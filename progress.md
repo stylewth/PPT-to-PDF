@@ -6,6 +6,7 @@
 | 上下文恢复 | 已读取 `lessons.md`、`task_plan.md`、`progress.md`、`findings.md`、`HANDOFF.md`；当前主线为 V3D 后续 `layout_decider.py` 与“标注可放置性”。 |
 | 基线测试 | `python -m unittest discover -s app\tests` 中 17 个测试因 `app/workspace/test_runs` 无写权限报 `PermissionError`，业务断言尚未执行到。 |
 | 比赛页面 | 官方 topic3 URL 可打开但静态抓取不到赛题正文；公开搜索只找到赛事启动新闻，未找到 topic3 细则全文。 |
+| Git 忽略维护 | 新增项目级 `.gitignore`，更新 `app/.gitignore`，覆盖 Python 缓存、前端产物、运行输出、临时文件和本地配置。 |
 
 ## 2026-05-11
 | 时间 | 进展 |

@@ -1,3 +1,9 @@
+# App runtime outputs
 workspace/
 .tmp_tests/
 tmp_tests_plain/
+
+# Python caches created when running tests from this directory
+__pycache__/
+*.py[cod]
+.pytest_cache/
