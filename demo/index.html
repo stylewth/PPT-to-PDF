@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>课件转讲义助手 Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-label="课件转讲义工作台">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Slide2Study Demo</p>
+            <h1>课件转讲义助手</h1>
+          </div>
+          <div class="top-actions">
+            <button class="ghost-button" id="loadSampleButton" type="button">载入示例</button>
+            <button class="primary-button" id="printButton" type="button">导出 PDF</button>
+          </div>
+        </header>
+
+        <div class="main-grid">
+          <aside class="control-panel" aria-label="输入与分析控制">
+            <section class="upload-zone" id="uploadZone">
+              <input
+                id="fileInput"
+                type="file"
+                accept=".ppt,.pptx"
+                aria-label="上传 PPT 文件"
+              />
+              <div class="upload-visual" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+              <div>
+                <h2 id="fileTitle">上传 PPT</h2>
+                <p id="fileMeta">支持课程课件与培训材料</p>
+              </div>
+            </section>
+
+            <section class="option-block" aria-label="场景选择">
+              <div class="section-heading">
+                <h2>使用场景</h2>
+                <p>决定解释口吻与页面留白</p>
+              </div>
+              <div class="segmented" role="tablist" aria-label="场景">
+                <button class="segment active" data-scenario="course" type="button">大学课程</button>
+                <button class="segment" data-scenario="training" type="button">企业培训</button>
+              </div>
+            </section>
+
+            <section class="option-block" aria-label="输出样式">
+              <div class="section-heading">
+                <h2>输出版式</h2>
+                <p>默认适合导入笔记软件</p>
+              </div>
+              <label class="radio-row">
+                <input type="radio" name="layoutMode" value="study" checked />
+                <span>学习版 PDF</span>
+              </label>
+              <label class="radio-row">
+                <input type="radio" name="layoutMode" value="notes" />
+                <span>大留白批注版</span>
+              </label>
+              <label class="radio-row">
+                <input type="radio" name="layoutMode" value="brief" />
+                <span>培训回看版</span>
+              </label>
+            </section>
+
+            <button class="wide-button" id="analyzeButton" type="button">开始转换</button>
+
+            <section class="analysis-log" aria-live="polite">
+              <div class="section-heading">
+                <h2>分析进度</h2>
+                <p id="statusText">等待课件</p>
+              </div>
+              <ol id="stepsList">
+                <li data-step="0">读取页面对象与层级</li>
+                <li data-step="1">识别动画展开顺序</li>
+                <li data-step="2">检测遮挡与信息丢失</li>
+                <li data-step="3">重构学习型讲义</li>
+              </ol>
+            </section>
+          </aside>
+
+          <section class="preview-panel" aria-label="学习型 PDF 预览">
+            <div class="preview-header">
+              <div>
+                <p class="eyebrow">Preview</p>
+                <h2 id="previewTitle">学习型 PDF 预览</h2>
+              </div>
+              <div class="score-box">
+                <span id="readabilityScore">--</span>
+                <small>可读性</small>
+              </div>
+            </div>
+
+            <div class="issue-strip" id="issueStrip" aria-label="检测问题"></div>
+
+            <div class="pdf-pages" id="pdfPages"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
