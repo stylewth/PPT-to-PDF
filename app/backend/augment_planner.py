@@ -5,15 +5,12 @@ from typing import Any
 from layout_decider import annotation_slot, decide_slide_layout, select_annotation_zone
 from object_reflow_planner import plan_object_reflow
 
-MAX_GUIDE_PAGE_RATIO = 0.15
 MAX_INLINE_MARKERS = 3
 MAX_GUIDE_TEXT = 90
-MAX_REFLOW_CARD_TEXT = 58
 
 
 def build_augment_plan(analysis: dict[str, Any]) -> dict[str, Any]:
     slides = [_plan_slide(slide) for slide in analysis.get("slides", [])]
-    slides = _apply_deck_budget(slides)
     return {
         "kind": "augment_plan",
         "version": "v3g",
@@ -33,11 +30,6 @@ def build_augment_plan(analysis: dict[str, Any]) -> dict[str, Any]:
                 for slide in slides
                 if slide["strategy"] == "object_reflow"
             ],
-            "expanded_pages": [
-                slide["source_slide"]
-                for slide in slides
-                if slide["strategy"] == "expand_after_native"
-            ],
             "report_only_pages": [
                 slide["source_slide"]
                 for slide in slides
@@ -54,80 +46,23 @@ def _plan_slide(slide: dict[str, Any]) -> dict[str, Any]:
     if strategy == "object_reflow" and not ((object_reflow or {}).get("operations")):
         strategy = "native_enhance" if slide.get("animation_target_count", 0) > 0 else "keep_native"
         object_reflow = None
-    guide_pages = _guide_pages(slide, strategy)
     return {
         "source_slide": slide.get("number", 0),
         "title": slide.get("title", ""),
         "size": slide.get("size", {}),
         "strategy": strategy,
-        "page_budget": 1 + len(guide_pages),
+        "page_budget": 1,
         "reason": layout.get("reason", ""),
         "object_boxes": slide.get("object_boxes", []),
         "inline_markers": _inline_markers(slide, strategy),
-        "guide_pages": guide_pages,
+        "guide_pages": [],
         "micro_reflow": _micro_reflow(slide, strategy),
         "object_reflow": object_reflow,
-        "reflow_page": None,
     }
 
 
-def _apply_deck_budget(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    max_extra_pages = max(1, int(len(slides) * MAX_GUIDE_PAGE_RATIO)) if slides else 0
-    used_extra_pages = 0
-    budgeted = []
-    for slide in slides:
-        if slide["strategy"] != "expand_after_native":
-            budgeted.append(slide)
-            continue
-        if used_extra_pages < max_extra_pages:
-            used_extra_pages += len(slide["guide_pages"])
-            budgeted.append(slide)
-            continue
-        budgeted.append(_as_report_only(slide, "整份 PPT 的导读页预算已用完，本页只写入报告。"))
-    return budgeted
-
-
-def _as_report_only(slide: dict[str, Any], reason: str | None = None) -> dict[str, Any]:
-    changed = dict(slide)
-    changed["strategy"] = "report_only"
-    changed["page_budget"] = 1
-    changed["reason"] = reason or "页面复杂或动画不支持，基础版不硬生成低价值导读页。"
-    changed["inline_markers"] = []
-    changed["guide_pages"] = []
-    return changed
-
-
-def _guide_pages(slide: dict[str, Any], strategy: str) -> list[dict[str, Any]]:
-    if strategy != "expand_after_native":
-        return []
-
-    steps = _guide_step_summaries(slide.get("animation_steps", []))
-    if not steps:
-        steps = ["本页没有可识别动画，保留原生页面作为阅读依据。"]
-
-    return [
-        {
-            "type": "expand",
-            "title": f"动画导读：{slide.get('title', '未命名页面')}",
-            "subtitle": _subtitle(slide, strategy),
-            "steps": [
-                {
-                    "order": index + 1,
-                    "text": text,
-                }
-                for index, text in enumerate(steps[:5])
-            ],
-            "metrics": {
-                "crowding": slide.get("crowding"),
-                "complexity": slide.get("complexity"),
-                "strategy": strategy,
-            },
-        }
-    ]
-
-
 def _inline_markers(slide: dict[str, Any], strategy: str) -> list[dict[str, Any]]:
-    if strategy not in {"native_enhance", "expand_after_native"}:
+    if strategy != "native_enhance":
         return []
     markers = []
     steps = slide.get("animation_steps", [])[:MAX_INLINE_MARKERS]
@@ -233,33 +168,6 @@ def _occlusion_flows(slide: dict[str, Any]) -> list[dict[str, Any]]:
     return flows
 
 
-def _content_items(slide: dict[str, Any]) -> list[str]:
-    seen = set()
-    items = []
-    title = str(slide.get("title") or "").strip()
-    if title:
-        seen.add(title)
-        items.append(_fit_text(title, MAX_REFLOW_CARD_TEXT))
-    for obj in sorted(slide.get("text_objects", []), key=_object_sort_key):
-        text = str(obj.get("text") or "").strip()
-        if text and text not in seen:
-            seen.add(text)
-            items.append(_fit_text(text, MAX_REFLOW_CARD_TEXT))
-    for step in slide.get("animation_steps", []):
-        text = _target_text(step)
-        if text and text not in seen and text != "未命名对象":
-            seen.add(text)
-            items.append(_fit_text(text, MAX_REFLOW_CARD_TEXT))
-    if not items:
-        items.append("本页没有可抽取文字，保留原生页作为对照。")
-    return items
-
-
-def _object_sort_key(obj: dict[str, Any]) -> tuple[int, int]:
-    box = obj.get("bbox") or {}
-    return (int(box.get("y", 0)), int(box.get("x", 0)))
-
-
 def _marker_role(index: int, total: int, step: dict[str, Any]) -> str:
     if step.get("covers_prior_object"):
         return "covered_content"
@@ -278,12 +186,6 @@ def _marker_hint(role: str) -> str:
         "covered_content": "遮挡变化",
     }
     return hints.get(role, "发生变化")
-
-
-def _subtitle(slide: dict[str, Any], strategy: str) -> str:
-    if strategy == "expand_after_native":
-        return "本页存在遮挡或拥挤风险，已追加展开说明页。"
-    return "本页保留原生排版，并补充动画阅读顺序。"
 
 
 def _guide_step_summaries(animation_steps: list[dict[str, Any]]) -> list[str]:

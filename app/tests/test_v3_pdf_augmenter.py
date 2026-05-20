@@ -8,7 +8,6 @@ import zipfile
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
@@ -129,16 +128,6 @@ class V3PdfAugmenterTest(unittest.TestCase):
         slide_plan = build_augment_plan(analysis)["slides"][0]
         self.assertEqual(slide_plan["strategy"], "native_enhance")
         self.assertIsNone(slide_plan["object_reflow"])
-        return
-        steps = slide_plan["micro_reflow"]["steps"]
-        texts = [step["text"] for step in steps]
-
-        self.assertEqual(slide_plan["strategy"], "object_reflow")
-        self.assertEqual(len(steps), 3)
-        self.assertIn("入口概念", texts[0])
-        self.assertTrue(any("遮挡" in text for text in texts))
-        self.assertIn("最终结论", texts[-1])
-        self.assertTrue(all(len(text) <= 90 for text in texts))
 
     def test_test_sample_complex_slides_are_planned_as_reflow_pages(self):
         analysis = analyze_presentation(parse_pptx(TEST_SAMPLE))
@@ -437,19 +426,8 @@ if __name__ == "__main__":
 
 
 def _read_zip_text(path: Path, name: str) -> str:
-    import zipfile
-
     with zipfile.ZipFile(path) as package:
         return package.read(name).decode("utf-8")
-
-
-def _shape_widths(root: ET.Element) -> list[int]:
-    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
-    return [
-        int(ext.attrib["cx"])
-        for ext in root.findall(".//a:xfrm/a:ext", ns)
-        if int(ext.attrib["cx"]) > 0
-    ]
 
 
 def _overlap_ratio(first: dict[str, int], second: dict[str, int]) -> float:

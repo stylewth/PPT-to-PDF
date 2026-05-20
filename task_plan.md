@@ -437,3 +437,12 @@
 | 回退 | 无安全空白时退回原 bbox，不硬挤压标题、正文或其它图形。 |
 | 验收 | `test.pptx` 当前 4 页、2 个 GIF；第 4 页小 GIF 宫格已放大，第 3 页大 GIF 不被无意义放大。 |
 | 验证 | `python -m unittest discover -s app\tests` 77 项通过；`python -m compileall app\backend` 通过；`node --check app\frontend\app.js` 通过。 |
+
+## 2026-05-20 项目瘦身与旧路线清理
+| 阶段 | 状态 | 边界 |
+|---|---|---|
+| tracked 生成物清理 | complete | 删除已纳入 git 的 `.pyc/__pycache__` 文件；`.gitignore` 已覆盖，源码与测试不依赖。 |
+| 旧 HTML 打印 PDF 路线 | complete | 删除无引用的 `app/backend/pdf_renderer.py`；当前主线继续由 LibreOffice 生成 `base.pdf`，再生成 `guide.pdf`。 |
+| 追加导读页旧分支 | complete | 删除 `expand_after_native`、新幻灯片追加、整页重画 `reflow_page` 等旧代码；保留输出中的 `guide_pages: []` 和 `guide_page_count=0` 用于验收。 |
+| 暂不删除项 | pending | `demo/`、历史规划文档、`pdf_micro_reflow.py`、核心样例 PPTX 仍和比赛展示/历史路线/回归有关，未经确认不删。 |
+| 验收 | complete | 单测 81 项、后端编译、前端 JS 语法检查通过；已重启 8765 并真实转换 `app/samples/test.pptx`。 |

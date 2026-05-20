@@ -210,3 +210,14 @@
 | 避让 | 扩展矩形必须在页面内，并避开同页标题、正文、图形等 `occupied_boxes`；空间不足时逐级缩小，最后才退回原 bbox。 |
 | 样例 | `test.pptx` 当前 4 页、2 个 GIF；第 4 页小 GIF 已自动放大为清晰关键帧宫格，第 3 页大 GIF 保持原位宫格。 |
 | 验证 | `python -m unittest discover -s app\tests` 77 项通过；`python -m compileall app\backend` 通过；`node --check app\frontend\app.js` 通过。 |
+
+## 2026-05-20 项目瘦身执行记录
+| 项目 | 结果 |
+|---|---|
+| 清理文件 | 删除 tracked `.pyc/__pycache__`、`app/backend/pdf_renderer.py`。 |
+| 简化代码 | `augment_planner.py` 删除追加导读页预算、`expand_after_native`、不可达内容卡片逻辑；`pdf_augmenter.py` 删除新建导读页和整页重画分支；`test_v3_pdf_augmenter.py` 删除不可达断言和无用 helper。 |
+| 主线复核 | 每个删改点均保持 `base.pdf` 原生对照、`guide.pdf` 同页学习版增强，不新增导读页。 |
+| 自动验证 | `python -m unittest discover -s app\tests` 81 项通过；`python -m compileall app\backend` 通过；`node --check app\frontend\app.js` 通过。 |
+| Web 验收 | 已重启 8765，`curl.exe -s -F "deck=@app/samples/test.pptx" http://127.0.0.1:8765/api/convert` 成功，`job_id=2e422db8f84c4c3d89317f85e0b983b4`。 |
+| 截图验收 | 已渲染并检查 `app/workspace/outputs/2e422db8f84c4c3d89317f85e0b983b4/guide_page1.png` 到 `guide_page4.png`；页 1/2 对象重排保持主线，页 3/4 GIF 关键帧正常替换原媒体区。 |
+| 遇到的问题 | `rg` 在当前环境 Access denied，改用 `git grep`/PowerShell；PowerShell 未指定 UTF-8 读取 JSON 会误解码，已用 `-Encoding UTF8` 复核。 |

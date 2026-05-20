@@ -252,3 +252,12 @@
 | 对 GIF 来说，大封面图在 PDF 中信息密度低，额外放关键帧条又会占用页面空白。 | 改为直接在原 GIF bbox 内用关键帧宫格替换封面图，保留作者放置媒体的位置，同时让动态过程可读。 |
 | 小 GIF 的原始 bbox 可能太小，直接原位替换仍然看不清关键帧。 | 以原 bbox 为锚点向附近空白扩展宫格，避开同页占位对象；不能安全扩展时才退回原 bbox。 |
 | 视频/音频没有 ffmpeg 前不能伪造关键帧或转写。 | 当前只严谨导出原文件并写入清单；后续接入 ffmpeg 后再生成真实 poster/关键帧。 |
+
+## 2026-05-20 项目瘦身发现
+| 发现 | 处理 |
+|---|---|
+| `.pyc/__pycache__` 被纳入 git，属于运行生成物。 | 删除 tracked `.pyc`；保留 `.gitignore` 规则，后续生成物不进入主线。 |
+| `pdf_renderer.py` 是 V2 HTML->浏览器打印 PDF 路线，当前没有源码引用。 | 删除该模块；当前产品主线只保留 LibreOffice 原生转 `base.pdf` 与学习版 `guide.pdf` 增强。 |
+| `expand_after_native`、追加导读页、新建 guide slide、整页 `reflow_page` 已与“不新增导读页、同页局部修复”路线冲突。 | 删除旧分支，保留 `guide_page_count=0` 作为验收指标，避免未来误回退到加页路线。 |
+| `demo/` 与根目录历史文档仍被任务计划标记为路演/复盘材料。 | 暂不删除；若最终提交包不需要，应单独确认后再清理。 |
+| PowerShell 读取 UTF-8 JSON 时未显式 `-Encoding UTF8` 会导致中文内容被错误解码，进而 `ConvertFrom-Json` 失败。 | 验收读取 JSON 时统一显式 `Get-Content -Encoding UTF8`。 |

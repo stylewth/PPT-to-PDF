@@ -20,10 +20,6 @@ P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 RELATION_LINE_CLEARANCE = 160000
-CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
-SLIDE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
-SLIDE_LAYOUT_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout"
-SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
 
 def generate_guide_pdf(
     pptx_path: str | Path,
@@ -85,51 +81,6 @@ def write_guide_deck(pptx_path: str | Path, output_path: str | Path, plan: dict[
 
     slide_paths = _slide_paths(entries)
     _enhance_source_slides(entries, slide_paths, plan)
-    next_slide_number = _next_slide_number(slide_paths)
-    layout_target = _first_layout_target(entries, slide_paths)
-    presentation_xml = entries.get(
-        "ppt/presentation.xml",
-        f"<p:presentation xmlns:p='{P_NS}' xmlns:r='{R_NS}'><p:sldIdLst/></p:presentation>".encode(),
-    ).decode("utf-8")
-    rels_xml = entries.get(
-        "ppt/_rels/presentation.xml.rels",
-        f"<Relationships xmlns='{PKG_REL_NS}'/>".encode(),
-    ).decode("utf-8")
-    content_types_xml = entries.get(
-        "[Content_Types].xml",
-        f"<Types xmlns='{CT_NS}'/>".encode(),
-    ).decode("utf-8")
-
-    presentation_xml = _ensure_relationship_namespace(presentation_xml)
-    presentation_xml = _ensure_sld_id_list_xml(presentation_xml)
-    max_slide_id = _max_slide_id(_xml(presentation_xml.encode("utf-8")).find(f"{{{P_NS}}}sldIdLst"))
-    next_rid = _next_rid(_xml(rels_xml.encode("utf-8")))
-
-    for slide_plan in plan.get("slides", []):
-        for guide_page in slide_plan.get("guide_pages", []):
-            slide_number = next_slide_number
-            next_slide_number += 1
-            rid = f"rId{next_rid}"
-            next_rid += 1
-            max_slide_id += 1
-
-            slide_path = f"ppt/slides/slide{slide_number}.xml"
-            entries[slide_path] = _guide_slide_xml(guide_page)
-            if layout_target:
-                entries[f"ppt/slides/_rels/slide{slide_number}.xml.rels"] = _slide_rels_xml(layout_target)
-
-            rel_xml = (
-                f'<Relationship Id="{rid}" Type="{SLIDE_REL_TYPE}" '
-                f'Target="slides/slide{slide_number}.xml"/>'
-            )
-            sld_id_xml = f'<p:sldId id="{max_slide_id}" r:id="{rid}"/>'
-            presentation_xml = _insert_before_close(presentation_xml, "sldIdLst", sld_id_xml)
-            rels_xml = _insert_before_close(rels_xml, "Relationships", rel_xml)
-            content_types_xml = _ensure_slide_content_type_xml(content_types_xml, slide_number)
-
-    entries["ppt/presentation.xml"] = presentation_xml.encode("utf-8")
-    entries["ppt/_rels/presentation.xml.rels"] = rels_xml.encode("utf-8")
-    entries["[Content_Types].xml"] = content_types_xml.encode("utf-8")
 
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as package:
         for name, data in entries.items():
@@ -137,14 +88,9 @@ def write_guide_deck(pptx_path: str | Path, output_path: str | Path, plan: dict[
     return output
 
 
-def _has_guide_pages(plan: dict[str, Any]) -> bool:
-    return any(slide.get("guide_pages") for slide in plan.get("slides", []))
-
-
 def _has_augments(plan: dict[str, Any]) -> bool:
     return any(
-        slide.get("guide_pages")
-        or slide.get("inline_markers")
+        slide.get("inline_markers")
         or slide.get("micro_reflow")
         or slide.get("object_reflow")
         for slide in plan.get("slides", [])
@@ -1141,12 +1087,6 @@ def _enhance_source_slides(
             continue
         if slide_plan.get("strategy") == "pdf_micro_reflow":
             continue
-        reflow_page = slide_plan.get("reflow_page")
-        if reflow_page:
-            slide_path = _source_slide_path(slide_paths, slide_plan.get("source_slide", 0))
-            if slide_path is not None:
-                entries[slide_path] = _reflow_slide_xml(reflow_page, slide_plan.get("size", {}))
-            continue
         markers = slide_plan.get("inline_markers") or []
         if not markers:
             continue
@@ -1170,84 +1110,6 @@ def _slide_paths(entries: dict[str, bytes]) -> list[str]:
     return sorted(paths, key=lambda value: int(re.search(r"slide(\d+)\.xml", value).group(1)))
 
 
-def _next_slide_number(slide_paths: list[str]) -> int:
-    numbers = [int(re.search(r"slide(\d+)\.xml", path).group(1)) for path in slide_paths]
-    return max(numbers, default=0) + 1
-
-
-def _first_layout_target(entries: dict[str, bytes], slide_paths: list[str]) -> str | None:
-    if not slide_paths:
-        return None
-    rels_path = _slide_rels_path(slide_paths[0])
-    if rels_path not in entries:
-        return None
-    root = _xml(entries[rels_path])
-    for rel in root.findall(f"{{{PKG_REL_NS}}}Relationship"):
-        if rel.attrib.get("Type") == SLIDE_LAYOUT_REL_TYPE:
-            return rel.attrib.get("Target")
-    return None
-
-
-def _slide_rels_path(slide_path: str) -> str:
-    directory, file_name = posixpath.split(slide_path)
-    return posixpath.join(directory, "_rels", f"{file_name}.rels")
-
-
-def _xml(data: bytes) -> ET.Element:
-    return ET.fromstring(data)
-
-
-def _max_slide_id(sld_id_list: ET.Element | None) -> int:
-    if sld_id_list is None:
-        return 255
-    values = []
-    for item in sld_id_list.findall(f"{{{P_NS}}}sldId"):
-        try:
-            values.append(int(item.attrib.get("id", "255")))
-        except ValueError:
-            values.append(255)
-    return max(values, default=255)
-
-
-def _next_rid(rels_root: ET.Element) -> int:
-    numbers = []
-    for rel in rels_root.findall(f"{{{PKG_REL_NS}}}Relationship"):
-        match = re.fullmatch(r"rId(\d+)", rel.attrib.get("Id", ""))
-        if match:
-            numbers.append(int(match.group(1)))
-    return max(numbers, default=0) + 1
-
-
-def _ensure_sld_id_list_xml(xml: str) -> str:
-    if re.search(r"<[^>]*sldIdLst[\s>/]", xml):
-        return xml
-    self_closing = re.search(r"<((?:[A-Za-z0-9_]+:)?presentation)\b([^>]*)/>", xml)
-    if self_closing:
-        tag = self_closing.group(1)
-        replacement = f"<{tag}{self_closing.group(2)}><p:sldIdLst></p:sldIdLst></{tag}>"
-        return xml[: self_closing.start()] + replacement + xml[self_closing.end() :]
-    return _insert_before_close(xml, "presentation", "<p:sldIdLst></p:sldIdLst>")
-
-
-def _ensure_relationship_namespace(xml: str) -> str:
-    if "xmlns:r=" in xml:
-        return xml
-    return re.sub(
-        r"(<(?:[A-Za-z0-9_]+:)?presentation\b)",
-        rf'\1 xmlns:r="{R_NS}"',
-        xml,
-        count=1,
-    )
-
-
-def _ensure_slide_content_type_xml(xml: str, slide_number: int) -> str:
-    part_name = f"/ppt/slides/slide{slide_number}.xml"
-    if part_name in xml:
-        return xml
-    override = f'<Override PartName="{part_name}" ContentType="{SLIDE_CONTENT_TYPE}"/>'
-    return _insert_before_close(xml, "Types", override)
-
-
 def _insert_before_close(xml: str, local_name: str, insertion: str) -> str:
     pattern = re.compile(rf"</(?:[A-Za-z0-9_]+:)?{re.escape(local_name)}>")
     match = pattern.search(xml)
@@ -1259,15 +1121,6 @@ def _insert_before_close(xml: str, local_name: str, insertion: str) -> str:
         replacement = f"<{tag}{self_closing.group(2)}>{insertion}</{tag}>"
         return xml[: self_closing.start()] + replacement + xml[self_closing.end() :]
     return xml[: match.start()] + insertion + xml[match.start() :]
-
-
-def _slide_rels_xml(layout_target: str) -> bytes:
-    return (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        f'<Relationships xmlns="{PKG_REL_NS}">'
-        f'<Relationship Id="rId1" Type="{SLIDE_LAYOUT_REL_TYPE}" Target="{escape(layout_target)}"/>'
-        "</Relationships>"
-    ).encode("utf-8")
 
 
 def _inline_marker_shapes_xml(
@@ -1541,103 +1394,6 @@ def _frame_shape(
   <p:nvSpPr><p:cNvPr id="{shape_id}" name="{escape(name)}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
   <p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="25400"><a:solidFill><a:srgbClr val="{color}"/></a:solidFill></a:ln></p:spPr>
 </p:sp>'''
-
-
-def _guide_slide_xml(page: dict[str, Any]) -> bytes:
-    title = str(page.get("title", "动画导读"))
-    subtitle = str(page.get("subtitle", ""))
-    steps = page.get("steps", [])
-    lines = [
-        _text_shape(2, "Guide Background", 0, 0, 12192000, 6858000, "", 100, "17201B", fill="F7F8F4", line=None),
-        _text_shape(3, "Guide Header", 520000, 320000, 11150000, 760000, "动画导读", 3200, "FFFFFF", fill="17324D", line=None),
-        _text_shape(4, "Guide Title", 720000, 1220000, 9800000, 460000, title, 2300, "17324D", fill=None, line=None),
-        _text_shape(5, "Guide Subtitle", 720000, 1660000, 9800000, 420000, subtitle, 1600, "66746D", fill=None, line=None),
-        _text_shape(6, "Guide Section", 720000, 2140000, 3600000, 360000, "本页变化顺序", 1800, "237A57", fill=None, line=None),
-    ]
-    y = 2640000
-    for index, step in enumerate(steps[:5], start=1):
-        text = str(step.get("text", ""))
-        base_id = 10 + index * 3
-        lines.append(_text_shape(base_id, f"Step Card {index}", 720000, y, 10750000, 620000, "", 100, "17201B", fill="FFFFFF", line="D8DFDA"))
-        lines.append(_text_shape(base_id + 1, f"Step Badge {index}", 900000, y + 100000, 900000, 410000, str(index), 2200, "FFFFFF", fill="237A57", line=None))
-        lines.append(_text_shape(base_id + 2, f"Step Text {index}", 1980000, y + 110000, 8900000, 430000, text, 1750, "17201B", fill=None, line=None))
-        y += 760000
-    metrics = page.get("metrics", {})
-    footer = f"策略：{metrics.get('strategy', 'native_enhance')}    拥挤度：{metrics.get('crowding', 'unknown')}    复杂度：{metrics.get('complexity', 'unknown')}"
-    lines.append(_text_shape(30, "Guide Footer", 720000, 6040000, 10750000, 420000, footer, 1450, "7A4A12", fill="FFF4DF", line="F4D9A9"))
-    return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="{R_NS}" xmlns:p="{P_NS}">
-  <p:cSld>
-    <p:spTree>
-      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
-      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
-      {''.join(lines)}
-    </p:spTree>
-  </p:cSld>
-  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
-</p:sld>'''.encode("utf-8")
-
-
-def _reflow_slide_xml(page: dict[str, Any], page_size: dict[str, Any]) -> bytes:
-    width = int(page_size.get("width") or 12192000)
-    height = int(page_size.get("height") or 6858000)
-    title = str(page.get("title") or "未命名页面")
-    subtitle = str(page.get("subtitle") or "")
-    content_items = [str(item) for item in page.get("content_items", []) if str(item).strip()]
-    steps = page.get("steps", [])
-    conclusion = str(page.get("conclusion") or "")
-    metrics = page.get("metrics", {})
-
-    lines = [
-        _text_shape(2, "Guide Reflow Background", 0, 0, width, height, "", 100, "17201B", fill="F7F8F4", line=None),
-        _text_shape(3, "Guide Reflow Header", 460000, 260000, 2620000, 520000, "学习版重排", 2450, "FFFFFF", fill="17324D", line=None, align="ctr", vertical_anchor="ctr"),
-        _text_shape(4, "Guide Reflow Title", 3300000, 260000, width - 3760000, 520000, title, 2150, "17324D", fill=None, line=None),
-        _text_shape(5, "Guide Reflow Subtitle", 460000, 860000, width - 920000, 360000, subtitle, 1350, "66746D", fill=None, line=None),
-        _text_shape(6, "Reflow Content Heading", 560000, 1380000, 4400000, 340000, "核心内容", 1650, "237A57", fill=None, line=None),
-        _text_shape(7, "Reflow Steps Heading", 6200000, 1380000, 4400000, 340000, "动画顺序", 1650, "237A57", fill=None, line=None),
-    ]
-
-    row_count = max(len(content_items[:5]), len(steps[:5]))
-    for index in range(1, row_count + 1):
-        y = 1840000 + (index - 1) * 650000
-        row_shapes: list[tuple[int, str]] = []
-        if index <= len(content_items[:5]):
-            item = content_items[index - 1]
-            base_id = 10 + index * 3
-            row_shapes.append((y, _text_shape(base_id, f"Reflow Content Card {index}", 560000, y, 4960000, 560000, "", 100, "17201B", fill="FFFFFF", line="D8DFDA")))
-            row_shapes.append((y + 95000, _text_shape(base_id + 2, f"Reflow Content Text {index}", 1220000, y + 95000, 4100000, 380000, item, 1350, "17201B", fill=None, line=None)))
-            row_shapes.append((y + 110000, _text_shape(base_id + 1, f"Reflow Content Badge {index}", 740000, y + 110000, 430000, 340000, str(index), 1550, "FFFFFF", fill="6A7F73", line=None, align="ctr", vertical_anchor="ctr")))
-        if index <= len(steps[:5]):
-            step = steps[index - 1]
-            text = str(step.get("text", ""))
-            base_id = 40 + index * 3
-            row_shapes.append((y, _text_shape(base_id, f"Reflow Step Card {index}", 6200000, y, 5420000, 560000, "", 100, "17201B", fill="FFFFFF", line="D8DFDA")))
-            row_shapes.append((y + 95000, _text_shape(base_id + 2, f"Reflow Step Text {index}", 6880000, y + 95000, 4440000, 380000, text, 1350, "17201B", fill=None, line=None)))
-            row_shapes.append((y + 110000, _text_shape(base_id + 1, f"Reflow Step Badge {index}", 6380000, y + 110000, 430000, 340000, str(index), 1550, "FFFFFF", fill="237A57", line=None, align="ctr", vertical_anchor="ctr")))
-        lines.extend(xml for _, xml in sorted(row_shapes, key=lambda item: item[0]))
-
-    footer = (
-        f"策略：{metrics.get('strategy', 'reflow_replace')}    "
-        f"拥挤度：{metrics.get('crowding', 'unknown')}    "
-        f"复杂度：{metrics.get('complexity', 'unknown')}"
-    )
-    lines.extend(
-        [
-            _text_shape(80, "Reflow Conclusion", 560000, 5540000, width - 1120000, 520000, conclusion, 1450, "17324D", fill="EAF3EF", line="BFD8CE"),
-            _text_shape(81, "Reflow Footer", 560000, 6200000, width - 1120000, 360000, footer, 1250, "7A4A12", fill="FFF4DF", line="F4D9A9"),
-        ]
-    )
-    return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="{R_NS}" xmlns:p="{P_NS}">
-  <p:cSld>
-    <p:spTree>
-      <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
-      <p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
-      {''.join(lines)}
-    </p:spTree>
-  </p:cSld>
-  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
-</p:sld>'''.encode("utf-8")
 
 
 def _text_shape(
