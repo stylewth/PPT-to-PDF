@@ -55,6 +55,8 @@ def _analyze_slide(slide: dict[str, Any], page: dict[str, int]) -> dict[str, Any
         "size": page,
         "object_count": len(objects),
         "text_box_count": len(text_objects),
+        "text_objects": _text_objects(text_objects),
+        "object_boxes": _object_boxes(objects),
         "animation_target_count": len({anim.get("target_id") for anim in animations if anim.get("target_id")}),
         "supported_animation_count": sum(1 for anim in animations if anim.get("supported", False)),
         "unsupported_animation_count": sum(1 for anim in animations if not anim.get("supported", False)),
@@ -66,6 +68,33 @@ def _analyze_slide(slide: dict[str, Any], page: dict[str, int]) -> dict[str, Any
         "warnings": warnings,
         "decision_hint": _decision_hint(crowding, complexity, metrics),
     }
+
+
+def _object_boxes(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": obj.get("id", ""),
+            "name": obj.get("name", ""),
+            "type": obj.get("type", ""),
+            "text": obj.get("text", ""),
+            "bbox": obj["bbox"],
+            "z_order": obj.get("z_order", 0),
+        }
+        for obj in objects
+        if obj.get("bbox")
+    ]
+
+
+def _text_objects(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": obj.get("id", ""),
+            "text": obj.get("text", ""),
+            "bbox": obj.get("bbox"),
+        }
+        for obj in objects
+        if str(obj.get("text", "")).strip()
+    ]
 
 
 def _metrics(
@@ -118,6 +147,14 @@ def _animation_step(animation: dict[str, Any], objects: list[dict[str, Any]]) ->
         "bbox": target.get("bbox"),
         "covers_prior_object": bool(covered_objects),
         "covered_object_ids": [obj.get("id", "") for obj in covered_objects],
+        "covered_objects": [
+            {
+                "id": obj.get("id", ""),
+                "text": obj.get("text", ""),
+                "bbox": obj.get("bbox"),
+            }
+            for obj in covered_objects
+        ],
     }
 
 
@@ -158,7 +195,7 @@ def _warnings(slide: dict[str, Any], metrics: dict[str, Any]) -> list[dict[str, 
             warnings.append(
                 {
                     "code": "unsupported_animation",
-                    "message": f"暂不支持动画 {animation.get('kind')}。",
+                    "message": f"已识别 {animation.get('kind')} 数值动画；终态坐标不稳定，保留原生 PDF 画面并列入复核。",
                 }
             )
     if not str(slide.get("notes", "")).strip():

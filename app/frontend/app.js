@@ -33,9 +33,12 @@ function setDownloads(result) {
   [
     ["Base PDF", result.base_pdf_url],
     ["Guide PDF", result.guide_pdf_url],
+    ["对比页", result.compare_url],
     ["预览", result.preview_url],
     ["分析", result.analysis_url],
     ["导读计划", result.augment_plan_url],
+    ["指标", result.metrics_url],
+    ["媒体清单", result.media_manifest_url],
     ["报告", result.report_url],
   ].filter(([, href]) => Boolean(href)).forEach(([label, href]) => {
     const link = document.createElement("a");

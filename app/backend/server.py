@@ -59,7 +59,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8765) -> None:
 
 
 class Slide2StudyHandler(BaseHTTPRequestHandler):
-    server_version = "Slide2StudyV3D/0.1"
+    server_version = "Slide2StudyV3G/0.1"
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -92,20 +92,7 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
             deck_path.write_bytes(upload["content"])
 
             result = convert_pptx(deck_path, output_dir, render_pdf=True)
-            self._send_json(
-                {
-                    "status": "ok",
-                    "job_id": job_id,
-                    "source": result["source"],
-                    "warnings": result["warnings"],
-                    "base_pdf_url": f"/outputs/{job_id}/base.pdf" if result["base_pdf_path"] else None,
-                    "guide_pdf_url": f"/outputs/{job_id}/guide.pdf" if result["guide_pdf_path"] else None,
-                    "analysis_url": f"/outputs/{job_id}/analysis.json",
-                    "augment_plan_url": f"/outputs/{job_id}/augment_plan.json",
-                    "report_url": f"/outputs/{job_id}/report.json",
-                    "preview_url": f"/outputs/{job_id}/preview.html",
-                }
-            )
+            self._send_json(build_convert_response(job_id, result))
         except Exception as exc:
             self._send_json({"status": "error", "error": str(exc)}, status=500)
 
@@ -143,6 +130,24 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
 def _safe_filename(filename: str) -> str:
     name = Path(filename).name
     return re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]", "_", name)
+
+
+def build_convert_response(job_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "source": result["source"],
+        "warnings": result["warnings"],
+        "base_pdf_url": f"/outputs/{job_id}/base.pdf" if result.get("base_pdf_path") else None,
+        "guide_pdf_url": f"/outputs/{job_id}/guide.pdf" if result.get("guide_pdf_path") else None,
+        "compare_url": f"/outputs/{job_id}/compare.html" if result.get("compare_html_path") else None,
+        "analysis_url": f"/outputs/{job_id}/analysis.json",
+        "augment_plan_url": f"/outputs/{job_id}/augment_plan.json",
+        "metrics_url": f"/outputs/{job_id}/metrics.json",
+        "media_manifest_url": f"/outputs/{job_id}/media_manifest.json" if result.get("media_manifest_path") else None,
+        "report_url": f"/outputs/{job_id}/report.json",
+        "preview_url": f"/outputs/{job_id}/preview.html",
+    }
 
 
 def _safe_log(message: str) -> None:

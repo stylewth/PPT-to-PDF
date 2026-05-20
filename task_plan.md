@@ -1,10 +1,47 @@
 # 赛道3 Demo 开发计划
 
+## 2026-05-16 大修路线重规划
+| 项 | 新结论 |
+|---|---|
+| 偏差判定 | 上一版 V3G 把“保留原页面”误做成“原页面主体不动”，导致截图中的主体文字、公式、单位行仍然重叠。 |
+| 新目标 | `guide.pdf` 必须让主体页面本身变清楚，而不是只在右侧栏解释遮挡。 |
+| 新主线 | PPTX 对象级微调重排：解析 shape，移动/缩放/复制具体对象，生成 `guide_deck.pptx`，再由 LibreOffice 转成 `guide.pdf`。 |
+| PDF 层定位 | PDF 层只做对比、指标、少量标注和视觉检查；不再承担主体重排。 |
+| 第一验收样例 | `app/samples/test.pptx` 第 2 页：正文、公式、单位行必须分开，页面主体可读。 |
+| 完整大修计划 | `docs/superpowers/plans/2026-05-16-object-level-reflow-overhaul.md`。 |
+
+## 2026-05-16 V3G 已完成范围
+| 模块 | 状态 | 产出 |
+|---|---|---|
+| PDF 微调重排 | 完成 | `app/backend/pdf_micro_reflow.py`，基于 PyMuPDF 复用原 PDF 局部区域，优先空白区，必要时扩展右侧栏。 |
+| 遮挡流程表达 | 完成 | `augment_plan.json` 写入 `micro_reflow.occlusion_flows`，`guide.pdf` 中展示“遮挡前 -> 覆盖后”。 |
+| 原生转换链路 | 完成 | LibreOffice 生成 `base.pdf`，PyMuPDF 生成 `guide.pdf`，保留原页主体。 |
+| 对比和指标 | 完成 | `compare.html`、`metrics.json`、`report.json`，用于比赛展示普通 PDF 与学习版 PDF 差异和提效数据。 |
+| 小白启动 | 完成 | `start.ps1`、`start.bat`、`env_check.py`、`app/README.md`。 |
+| 比赛文档 | 完成 | `使用说明.md`、`路演脚本.md`、`比赛提交清单.md`、`docs/competition/README.md`。 |
+| 样例验收 | 完成 | `test.pptx`、`animation_guide_smoke.pptx`、`course_animation_occlusion.pptx`、`native_conversion_smoke.pptx`、`Review+chapter24-27.pptx` 均完成真实转换验证。 |
+| 下一阶段 | 预留 | V4 再接真实 AI 讲义解释，不影响当前比赛基础成品。 |
+
 ## 目标
 开发一个“小白开箱即用”的演示型 PPT 转学习型 PDF Demo，面向大学课程课件和企业培训 PPT，展示系统如何把依赖讲师现场讲解的动态 PPT 重构为可阅读、可批注、可复习的学习型 PDF。
 
 ## 当前阶段
-阶段 3：路线修正为“原生保真转 PDF + 智能增补讲义层”。当前已进入 V3D，同页增强先实现轻量编号和局部高亮，后续继续攻关融合重排和拥挤布局决策。
+阶段 15：最终路线已锁定为“原生 `base.pdf` + PDF 层微调重排”。下一次正式执行时，先废弃上一版 `reflow_replace` 的整页重画路径，再让 `test.pptx` 在 `guide.pdf` 中保持原页面主体，局部让位、遮盖、裁剪复用和叠加动画顺序。
+
+## 最终路线锁定
+| 项 | 定法 |
+|---|---|
+| 产品目标 | 做一个面向课程课件和企业培训材料的本地 PPTX 转学习型 PDF 工具，参加小鹏 AI 公开赛赛道 3。 |
+| 转换底座 | LibreOffice/Unoserver 只负责生成原生 `base.pdf`，保证基础画面和排版。 |
+| 重排定义 | 不抽取内容重画页面；只在 `base.pdf` 画面基础上做 PDF 层局部微调，尤其要把被遮挡内容放到清晰位置并表达流程关系；放置位置优先使用原页空白，不固定塞进展开栏。 |
+| 首版输入 | 只支持 `.pptx`。 |
+| PDF 编辑 | 按需要引入 PyMuPDF；缺依赖时直接报错，不生成假结果。 |
+| AI 接入 | 首版不接真实大模型 API；保留 AI 解释接口，路演中如实说明当前为 AI/VibeCoding 辅助构建的 Agent 工具。 |
+| 交付形态 | 本地可运行项目、Web/CLI、`base.pdf`、`guide.pdf`、`compare.html`、使用说明、样例输出、提效数据、路演脚本。 |
+| 自主执行 | 用户下令开始后，非破坏性开发、测试、调试、文档补齐连续完成；完成后自动做 5 轮自审优化。 |
+| 停止条件 | 破坏性操作、不可逆操作、方向冲突、需要真实外部账号/API Key 时停下来确认。 |
+
+完整执行计划见 `docs/superpowers/plans/2026-05-16-final-product-route.md`。后续如果历史章节与本节冲突，以本节为准。
 
 ## 阶段清单
 | 阶段 | 状态 | 产出 |
@@ -19,8 +56,34 @@
 | 8. V3A 原生 PDF 底座 | complete | LibreOffice 已跑通真实 `base.pdf` 转换，CLI 和 Web 上传均可生成结果 |
 | 9. V3B 分析数据升级 | complete | 已输出 `analysis.json`，包含页面尺寸、动画步骤、拥挤指标和策略提示 |
 | 10. V3C 动画导读基础版 | complete | 已输出 `guide.pdf` 和 `augment_plan.json`，动画页可追加导读说明页 |
-| 11. V3D 原页同页增强小步 | complete | `guide.pdf` 的原生页已可叠加动画编号和局部高亮框；低拥挤动画页保持 1 页，复杂页才追加导读页 |
-| 12. V3D 复杂课件可读性修正 | in_progress | 止损热修已完成：Review 样例输出从 75 页降到 42 页，绿色大框已关闭；下一步做有用标注 |
+| 11. V3D 原页同页增强小步 | complete | `guide.pdf` 的原生页已可叠加动画编号和局部高亮框；低拥挤动画页保持 1 页，复杂页先进入报告 |
+| 12. V3D 复杂课件可读性修正 | complete | 止损热修、`layout_decider.py`、标注可放置性和导读页泛滥控制已完成 |
+| 13. V3F 综合样例验收 | complete | `animation_guide_smoke.pptx`、`test.pptx`、`Review+chapter24-27.pptx` 真实转换通过，页数未膨胀，抽样页标注不遮挡正文 |
+| 14. 动画识别扩展 | complete | 已支持 `blinds(horizontal)`、`wheel(1)` 和明确的 `ppt_x/ppt_y` 位置移动；无法确定语义的裸 `anim` 仍不硬猜 |
+| 15. V3G PDF 微调重排 | in_progress | 纠偏：上一版 `reflow_replace` 属于抽取重画，不符合目标；下一步改为基于 `base.pdf` 的局部微调重排 |
+| 16. 小白开箱即用封装 | pending | 补 LibreOffice 检测、启动脚本和更清晰的本地运行入口 |
+| 17. 对比展示与提效指标 | pending | 输出 `compare.html`、`metrics.json` 和演示数据，让评委一眼看到普通 PDF 与学习版 PDF 的差异 |
+| 18. 路演交付包 | pending | 固化样例、对比截图、使用说明、3 分钟演示脚本和能力边界 |
+| 19. 全量回归和五轮自审 | pending | 单测、编译、前端检查、样例转换、PDF 渲染检查、路线/功能/视觉/赛题/交付五轮优化 |
+| 20. AI 讲义解释版预留 | pending | 独立接口、关闭状态、引用来源和不足提示 |
+
+## 2026-05-17 视觉对象分布修正
+| 项 | 状态 | 结果 |
+|---|---|---|
+| 避免右栏化 | complete | 正文重排不再强行贴到页面 10% 左边，优先保留原正文组水平起点。 |
+| 图文关系 | complete | 视觉对象先按关联正文生成局部候选，右侧、上方、下方、原相对位置均参与评分。 |
+| 组内避让 | complete | 同组公式优先放置，图片随后避让，避免宽公式被图像挤压或相互遮挡。 |
+| 样例验收 | complete | `test.pptx` 真实 Web 转换 `0406b9f8281c41188ca6cc99eea5b7b5`，两页 `guide.pdf` 不再统一右侧堆图。 |
+
+## 2026-05-17 路线防偏重修计划
+| 阶段 | 状态 | 目标 |
+|---|---|---|
+| 路线契约 | pending | 写入“局部语义组修复”硬约束，禁止全局左栏/右栏式重排。 |
+| 语义分组 | pending | 先识别文字、公式、图片的对应组，再决定谁移动。 |
+| 局部修复 | pending | 只在遮挡组附近找清晰位置，稳定对象默认不动。 |
+| 意图指标 | pending | 新增右栏化、左栏化、移动距离、组间距离等防偏指标。 |
+| 截图验收 | pending | 每次真实转换后对比 `base.pdf` 与 `guide.pdf`，截图不合格不算完成。 |
+| 执行计划 | complete | 详细路线见 `docs/superpowers/plans/2026-05-17-route-drift-repair.md`。 |
 
 ## 关键约束
 | 约束 | 决策 |
@@ -42,9 +105,12 @@
 ## 下一步建议
 | 优先级 | 任务 | 原因 |
 |---|---|---|
-| 1 | 接入真实 PPTX 解析 | 读取页面对象、层级、备注、基础动画信息 |
-| 2 | 生成真实 PDF | 从浏览器打印过渡到后端 PDF 渲染 |
-| 3 | 补一份路演样例 PPT | 让比赛演示从“原 PPT”到“学习型 PDF”闭环 |
+| 1 | V3G PDF 微调重排 | 当前 `test.pptx` 已能识别动画；必须在保留原页面主体的基础上做空白优先放置、必要时让位、遮挡展开、裁剪搬移和流程关系表达 |
+| 2 | 小白开箱即用封装 | 比赛演示不能依赖命令行，必须有一键启动和清晰错误提示 |
+| 3 | `compare.html` 对比展示 | 比赛展示必须一眼看懂普通 PDF 和学习版 PDF 的差异 |
+| 4 | 提效指标与 ROI 证明 | 赛题明确要求用数据证明节省时间、提升效率、减少错误 |
+| 5 | 路演交付包 | 评委需要看到原 PPT、普通 PDF、学习型 PDF、对比页、问题报告和使用说明 |
+| 6 | AI 讲义解释版预留 | 后续增强解释能力，但不能阻塞基础版稳定交付 |
 
 ## 基础功能共识
 | 功能 | 首版要做 | 暂不做 |
@@ -146,8 +212,8 @@
 | 无动画或仅装饰变化 | 保留原生页，只加很轻的提示或不处理 | 1 页 |
 | 细小变化：少量文字/图标出现，画面主体不变 | 同一页内加编号、变化提示条、局部高亮，不新增展开页 | 1 页 |
 | 中等变化：多个知识点逐步出现，但同属一个逻辑组 | 同一页二次排版，保留主要图片/图表，右侧或底部加入步骤说明 | 1 页 |
-| 较大变化：多个逻辑组、遮挡明显、最终态看不懂过程 | 拆成 2 页：总览页 + 展开说明页 | 2 页 |
-| 很大变化：一页承担多个推导/流程/案例 | 按语义分组拆成 2-4 页，禁止按动画数量无限拆 | 2-4 页 |
+| 较大变化：多个逻辑组、遮挡明显、最终态看不懂过程 | 默认替换为 1 页融合重排页，`base.pdf` 保留原貌 | 1 页 |
+| 很大变化：一页承担多个推导/流程/案例 | 先报告为需人工确认；不默认追加导读页，不机械拆页 | 1 页或人工确认后拆页 |
 
 ## 同页增强表现方式
 | 引导方式 | 用途 |
@@ -166,7 +232,7 @@
 | 简单页 | 1 页，尽量接近原生转换 |
 | 动画细小页 | 1 页，在原画面基础上轻量标注 |
 | 动画中等页 | 1 页，允许重排空间但保留核心图片/图表 |
-| 动画复杂页 | 2-4 页，按语义组拆，不按动画数拆 |
+| 动画复杂页 | 默认 1 页 PDF 微调重排，保留原画面主体，优先利用原页空白放置遮挡展开内容，必要时再让位 |
 | 无法可靠处理页 | 保留原生页，并追加问题说明 |
 
 ## 推荐开源组件
@@ -208,10 +274,69 @@
 | V3B | 第二步 | `analysis.json` 页面分析、动画顺序、拥挤指标 |
 | V3C | 第三步 | `guide.pdf` 动画导读基础版 |
 | V3D | 第四步 | 同页增强、融合重排、拆页决策 |
-| V3E | 第五步 | 前端模式选择、下载和错误提示 |
-| V3F | 最后 | 3 类真实样例验证 |
+| V3F | 已完成 | 3 类真实样例验证 |
+| V3G | 当前下一步 | PDF 微调重排 |
+| V3H | 之后 | 前端结果解释和下载体验 |
+| V3I | 之后 | 小白开箱即用封装 |
+| V3J | 之后 | 对比展示与提效指标 |
+| V3K | 之后 | 路演交付包 |
+| V4 | 最后 | AI 讲义解释版 |
 
-详细路线见 `赛道3/development_roadmap.md`。当前硬前提是安装 LibreOffice 或配置 Unoserver，否则不能进入 V3A 验收。
+详细路线见 `赛道3/development_roadmap.md`。当前硬前提已经从“原生转换能否跑通”转为“复杂动画页如何在保留原 PDF 画面的基础上微调得更可读”。
+
+## 2026-05-14 后续路线
+
+| 阶段 | 目标 | 关键文件 | 验收标准 |
+|---|---|---|---|
+| V3G PDF 微调重排 | 对 `unsupported_animation_count=0`、步骤多、重叠高的复杂动画页，以 `base.pdf` 原页为底做同页微调 | `layout_decider.py`、`augment_planner.py`、`pdf_micro_reflow.py`、`test_v3_pdf_micro_reflow.py` | `test.pptx` 的 `guide.pdf` 仍为 2 页；原画面主体保留；被遮挡内容在清晰位置可见；流程关系明确；布局科学、美观，不追加导读页 |
+| V3H 前端输出解释 | Web 页面展示为什么某页增强、为什么某页只报告，下载区更清晰 | `server.py`、`frontend/app.js`、`frontend/index.html`、`frontend/styles.css` | 上传后能看到 `base.pdf`、`guide.pdf`、`report.json`、`analysis.json`；错误和策略原因中文直说 |
+| V3I 开箱封装 | 非技术用户双击启动，自动检查 LibreOffice | `start.ps1`、`start.bat`、`app/backend/env_check.py`、`app/README.md` | 缺 LibreOffice 时给安装/路径提示；已安装时自动打开本地网页 |
+| V3J 对比展示与提效指标 | 用可视对比和数据证明工具价值 | `compare.html`、`metrics.json`、`report.json`、`使用说明.md`、演示样例输出 | 展示普通 PDF vs 学习版 PDF 差异、人工处理 vs 工具处理的时间节省、识别问题数、可复用成本 |
+| V3K 路演交付 | 准备比赛演示材料和固定样例输出 | `demo/`、`samples/`、`docs/` 或根目录演示说明 | 3 分钟内演示：上传 PPTX -> 生成 base/guide/report/metrics -> 展示复杂页导读价值 |
+| V4 AI 解释版 | 可选接入 AI，把页面内容解释和动画意图生成到独立输出 | `explanation_provider.py`、`ai_notes_builder.py`、前端模式开关 | 无 API 时入口不可用且说明原因；有 API 时解释必须引用 PPT 文本/备注来源 |
+
+## V3G 执行细则
+
+| 规则 | 定法 |
+|---|---|
+| 触发条件 | `unsupported_animation_count == 0`，动画步骤超过 5，且页面高重叠或高拥挤 |
+| 输出方式 | 以 `base.pdf` 原页为底，`guide.pdf` 同页微调；不整页重画、不追加导读页 |
+| 重排方式 | 先识别原页可用空白区，把遮挡前后的局部区域裁剪复用到清晰位置；空白不足时再缩放原页腾出侧边/底部展开区；用编号、箭头或关系线表达流程 |
+| 禁止事项 | 不抽取文字重画整页；不承诺任意 PDF 语义对象可精确移动；不能可靠定位就写入报告 |
+| 首个验收样例 | `app/samples/test.pptx`，目标是 `base.pdf` 2 页、`guide.pdf` 2 页；每页保留原画面主体面积不低于 85%；遮挡内容可独立看清且能看出先后关系 |
+
+## 2026-05-14 二次纠偏：PDF 微调重排路线
+
+| 层级 | 方案 | 结论 |
+|---|---|---|
+| 原生底座 | LibreOffice/Unoserver 生成 `base.pdf` | 继续保留，作为所有微调的画面来源 |
+| PDF 主编辑 | PyMuPDF | 主攻：支持打开页面、绘制遮盖/文本/形状、复用页面裁剪区域、输出新 PDF |
+| PDF 备选 | pypdf + reportlab | 可做覆盖层和页面合并，但局部编辑弱于 PyMuPDF |
+| 坐标映射 | PPTX EMU 坐标 -> PDF points | 可行，需用 slide 宽高和 PDF page rect 建立线性映射 |
+| 微调策略 | 空白优先放置、原页缩放让位、局部遮盖、局部复制、遮挡展开、流程箭头/关系线叠加 | 符合“保留原画面基础上的微调重排” |
+| 不做 | 全量重画 PPT、从 PDF 反推高层对象、任意对象级精确搬移 | 技术风险高，容易伪造能力 |
+
+## V3G 新开发顺序
+
+| 顺序 | 任务 | 验收 |
+|---|---|---|
+| 1 | 新增 PDF 依赖检查，优先 PyMuPDF | 缺依赖时直接报错，不生成假重排 |
+| 2 | 新增 `pdf_micro_reflow.py` | 输入 `base.pdf` + `augment_plan.json`，输出同页数 `guide.pdf` |
+| 3 | 实现空白优先的放置决策 | 优先把遮挡展开内容放在原页空白处，放不下才缩放让位 |
+| 4 | 实现 PPTX bbox 到 PDF 坐标映射 | `test.pptx` 的动画目标区域能映射到 PDF 上的正确矩形 |
+| 5 | 实现局部遮盖、裁剪搬移和流程连接 | 被遮挡区域可在原页空白区或必要展开区独立看清，并能看出覆盖前后关系 |
+| 6 | 实现页面裁剪复用 | 可把原 PDF 局部区域复制到旁注/放大框/流程节点，保持视觉来源 |
+| 7 | 多轮视觉回归 `test.pptx` 和 Review 样例 | 页数不膨胀，原画面主体保留，复杂页可读性提升；至少反复调整布局到不遮挡、连线清晰、边距统一、视觉协调 |
+
+## 路线取舍
+
+| 不优先 | 原因 |
+|---|---|
+| 继续泛化更多动画类型 | `test.pptx` 已无 unsupported 动画；当前主要矛盾不是识别，而是复杂页在原画面上的微调表达 |
+| 直接做 AI | 基础版还没把复杂动画路径稳定表达出来，AI 会掩盖结构问题 |
+| 追加导读页 | 用户已明确认为多加导读页实际意义低；后续默认不新增页，改做 PDF 同页微调 |
+| 泛化到任意 PPT 的完美重排 | 范围过大，先用 `test.pptx` 做有限规则闭环，再扩展样例 |
+| 打包安装器 | 可放在一键启动脚本之后，不先做重型安装包 |
 
 ## 第一轮开发顺序
 | 顺序 | 任务 | 结果 |
@@ -246,3 +371,69 @@
 | Web 健康检查 | `http://127.0.0.1:8765/api/health` 返回 200 |
 | Web 上传转换 | `/api/convert` 成功返回 HTML/PDF/JSON URL |
 | 页面截图 | `赛道3/app/workspace/v2_home.png` 成功生成 |
+## 2026-05-16 当前路线状态
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| V3G 对象级微调重排 | 已落地 | `guide_deck.pptx` 先移动/缩放 PPTX 对象，再由 LibreOffice 转 `guide.pdf`。 |
+| 遮挡诊断 | 已落地 | `reflow_diagnostics.py` 生成遮挡边，结合动画覆盖关系和几何重叠。 |
+| 重排规划 | 已落地 | `object_reflow_planner.py` 按正文区/图片区排布，保留标题，避免空重排。 |
+| 作者意图保护 | 已修正 | 无遮挡关系的图片/公式/图形默认不动，避免把整页视觉元素统一搬到右侧。 |
+| 图文对应关系 | 已修正 | 相关公式/图片绑定到最近正文组，就近移动并组内避让，避免破坏原本讲解关系。 |
+| 编号和公式稳定性 | 已修正 | 重排编号避让对象外侧；公式对象默认只平移不缩放。 |
+| OLE 公式写回 | 已修正 | `graphicFrame` 外层与 fallback 内层坐标同步更新，LibreOffice 输出不再显示旧位置。 |
+| OOXML 写回 | 已落地 | `ooxml_slide_editor.py` 直接编辑 shape 坐标和尺寸，并加流程编号。 |
+| 样例验收 | 已完成 | `test.pptx`、`Review+chapter24-27.pptx` 均完成真实转换和截图抽查。 |
+| 下一步 | 待做 | 清理历史 PDF 微重排表述，优化 `compare.html` 展示文案，准备比赛提交包和演示脚本。 |
+## 2026-05-17 当前阶段补充
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| OLE 公式稳定性 | 已修复 | 学习版 PDF 不再直接依赖 LibreOffice 对移动后 OLE 公式的渲染结果，改为 PPTX fallback 预览图覆盖。 |
+| 图文组内避让 | 已修复 | 公式、图片、编号均进入占位避让；已移动图像会影响后续公式落位，避免新遮挡。 |
+| 样例验收 | 已完成 | `sample/test.pptx` 真实 Web 输出已复核，最新 job 为 `9ab6c32e2d134133bae1456b317ecc64`。 |
+| 下一步 | 待做 | 继续扩大样例集，针对更多 PPTX 里的公式类型、SmartArt、组合形状和矢量图做回归。 |
+## 2026-05-17 路线防偏重修执行结果
+| 阶段 | 状态 | 结果 |
+|---|---|---|
+| 路线契约 | complete | 已新增 `docs/reflow_route_contract.md`，明确局部修复、语义组不散、稳定对象不动、截图验收。 |
+| 语义分组 | complete | 已新增 `app/backend/reflow_groups.py`，用动画覆盖关系建立正文、公式、图片的局部修复组。 |
+| 局部修复 | complete | `object_reflow_planner.py` 已取消复杂页默认正文左栏化/图片右栏化，改为只移动遮挡关系里的对象并靠近语义锚点落位。 |
+| 意图指标 | complete | `report.json` 已写入 `reflow_intent_check`，检查右栏化、左栏化和过大位移。 |
+| 截图验收 | complete | 已新增 `app/tests/render_sample_reflow_check.py`，真实转换 `test.pptx` 并渲染 `base.pdf`/`guide.pdf` 前两页截图。 |
+| 旧路线清理 | complete | 已移除旧 `legacy_pack_*` 包装函数，代码主线只保留局部文本修复和局部视觉修复，避免回退到全局分栏路线。 |
+
+## 2026-05-18 局部重排关系线收口
+| 阶段 | 状态 | 结果 |
+|---|---|---|
+| 漂移指标 | complete | `reflow_visual_check` 区分无锚点漂移和有锚点让位；`max_unexplained_move_ratio` 才触发移动过大告警。 |
+| 关系线 | complete | `pdf_augmenter.py` 的重排关系线改为对象外缘到外缘连接，避免中心连线穿过正文。 |
+| 单对象右移 | complete | 单个有语义锚点的公式右移不再计为系统性右栏化，`right_column_bias` 只描述多个视觉对象集中右移。 |
+| 样例验收 | complete | `test.pptx` 新输出 `app/tests/.tmp_runs/reflow_visual_check/0d60abfdfcf9444288e5c415403d4289/`，两页 `reflow_intent_check.passed=true` 且 warnings 为空。 |
+| 箭头安全距 | complete | 关系线端点新增目标外侧安全距离，避免 PowerPoint/PDF 箭头三角压住公式或图像。 |
+
+## 2026-05-18 GIF/视频媒体处理阶段
+| 阶段 | 状态 | 目标 |
+|---|---|---|
+| 媒体识别 | complete | 从 PPTX slide 关系和 `a:blip` 中识别 GIF/视频素材，绑定到原始对象 bbox。 |
+| GIF 可读化 | complete | 导出原始 GIF，抽取关键帧，生成 `media_manifest.json`、poster 和关键帧 strip。 |
+| PDF 原位替换 | complete | 在 `guide.pdf` 原 GIF bbox 内用关键帧宫格替换封面图，不移动无关图文，不做全局右栏堆放。 |
+| Web 输出 | complete | 下载区暴露媒体清单和导出素材，让评委能追溯原始动态内容。 |
+| 真实样例验收 | complete | 使用用户已加入 GIF 的 `app/samples/test.pptx` 转换并截图审查。 |
+
+## 2026-05-18 GIF/视频媒体处理执行结果
+| 项目 | 结果 |
+|---|---|
+| GIF 识别 | `test.pptx` 第 3 页 `ppt/media/image6.gif` 被识别为动态媒体，保留原图位置。 |
+| 媒体导出 | 输出 `media_manifest.json`、原始 GIF、poster、6 帧关键帧 strip。 |
+| PDF 表达 | `guide.pdf` 第 3 页在原 GIF 区域直接替换为 6 张关键帧宫格，标题不动，不额外占底部空白。 |
+| 视频边界 | 已识别并导出视频/音频原文件；关键帧摘要留给后续 ffmpeg 接入，不伪造视频帧。 |
+| 验证 | `python -m unittest discover -s app\tests` 76 项通过；`python -m compileall app\backend` 通过；`node --check app\frontend\app.js` 通过。 |
+
+## 2026-05-19 GIF 宫格自适应放大
+| 项目 | 结果 |
+|---|---|
+| 目标 | 小 GIF 不再被原始图片尺寸限制导致关键帧过小。 |
+| 策略 | 原 bbox 作为语义锚点，宫格可向周边空白扩展；扩展必须包含原 bbox，且避让同页 `occupied_boxes`。 |
+| 回退 | 无安全空白时退回原 bbox，不硬挤压标题、正文或其它图形。 |
+| 验收 | `test.pptx` 当前 4 页、2 个 GIF；第 4 页小 GIF 宫格已放大，第 3 页大 GIF 不被无意义放大。 |
+| 验证 | `python -m unittest discover -s app\tests` 77 项通过；`python -m compileall app\backend` 通过；`node --check app\frontend\app.js` 通过。 |

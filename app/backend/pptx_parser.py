@@ -10,10 +10,22 @@ from xml.etree import ElementTree as ET
 
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 NOTES_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide"
 DEFAULT_SLIDE_WIDTH = 12192000
 DEFAULT_SLIDE_HEIGHT = 6858000
+SUPPORTED_ANIMATION_KINDS = {
+    "appear",
+    "fade",
+    "wipe",
+    "blinds",
+    "wheel_in",
+    "wheel_out",
+    "motion",
+    "motion_x",
+    "motion_y",
+}
 
 
 class PptxParseError(ValueError):
@@ -65,7 +77,8 @@ def _slide_paths(names: set[str]) -> list[str]:
 
 def _parse_slide(package: zipfile.ZipFile, slide_path: str, slide_number: int) -> dict[str, Any]:
     root = _xml(package.read(slide_path))
-    objects = _parse_objects(root)
+    relationships = _slide_relationships(package, slide_path)
+    objects = _parse_objects(root, relationships)
     animations = _parse_animations(root, objects)
     notes = _parse_notes(package, slide_path)
     title = next((obj["text"] for obj in objects if obj["text"]), f"Slide {slide_number}")
@@ -97,11 +110,12 @@ def _parse_page_size(root: ET.Element) -> dict[str, int]:
         return {"width": DEFAULT_SLIDE_WIDTH, "height": DEFAULT_SLIDE_HEIGHT}
 
 
-def _parse_objects(root: ET.Element) -> list[dict[str, Any]]:
+def _parse_objects(root: ET.Element, relationships: dict[str, dict[str, str]] | None = None) -> list[dict[str, Any]]:
     sp_tree = root.find(f".//{{{P_NS}}}spTree")
     if sp_tree is None:
         return []
 
+    relationships = relationships or {}
     objects: list[dict[str, Any]] = []
     z_order = 0
     for child in list(sp_tree):
@@ -113,18 +127,96 @@ def _parse_objects(root: ET.Element) -> list[dict[str, Any]]:
         name = c_nv_pr.attrib.get("name", tag) if c_nv_pr is not None else tag
         text = _collect_text(child)
         bbox = _parse_bbox(child)
-        objects.append(
-            {
-                "id": object_id,
-                "name": name,
-                "type": tag,
-                "text": text,
-                "bbox": bbox,
-                "z_order": z_order,
-            }
-        )
+        item = {
+            "id": object_id,
+            "name": name,
+            "type": tag,
+            "text": text,
+            "bbox": bbox,
+            "z_order": z_order,
+        }
+        media = _parse_object_media(child, relationships)
+        if media:
+            item["media"] = media
+        objects.append(item)
         z_order += 1
     return objects
+
+
+def _slide_relationships(package: zipfile.ZipFile, slide_path: str) -> dict[str, dict[str, str]]:
+    rels_path = _rels_path(slide_path)
+    try:
+        rels_root = _xml(package.read(rels_path))
+    except KeyError:
+        return {}
+
+    relationships: dict[str, dict[str, str]] = {}
+    for rel in rels_root.findall(f"{{{REL_NS}}}Relationship"):
+        rel_id = rel.attrib.get("Id", "")
+        target = rel.attrib.get("Target", "")
+        if not rel_id or not target:
+            continue
+        relationships[rel_id] = {
+            "id": rel_id,
+            "type": rel.attrib.get("Type", ""),
+            "target": target,
+            "target_mode": rel.attrib.get("TargetMode", ""),
+            "path": posixpath.normpath(posixpath.join(posixpath.dirname(slide_path), target)),
+        }
+    return relationships
+
+
+def _parse_object_media(element: ET.Element, relationships: dict[str, dict[str, str]]) -> dict[str, str] | None:
+    rel_id, relationship = _object_media_relationship(element, relationships)
+    if not relationship:
+        return None
+    media_path = relationship.get("path", "")
+    extension = Path(media_path).suffix.lower()
+    if not extension:
+        return None
+    return {
+        "rel_id": rel_id,
+        "relationship_type": relationship.get("type", ""),
+        "target": relationship.get("target", ""),
+        "path": media_path,
+        "extension": extension,
+        "kind": _media_kind(extension, relationship.get("type", "")),
+        "target_mode": relationship.get("target_mode", ""),
+    }
+
+
+def _object_media_relationship(
+    element: ET.Element,
+    relationships: dict[str, dict[str, str]],
+) -> tuple[str, dict[str, str] | None]:
+    for node in element.iter():
+        if _local_name(node.tag) not in {"videoFile", "audioFile"}:
+            continue
+        rel_id = node.attrib.get(f"{{{R_NS}}}embed") or node.attrib.get(f"{{{R_NS}}}link")
+        if rel_id and rel_id in relationships:
+            return rel_id, relationships[rel_id]
+
+    blip = element.find(f".//{{{A_NS}}}blip")
+    if blip is None:
+        return "", None
+    rel_id = blip.attrib.get(f"{{{R_NS}}}embed") or blip.attrib.get(f"{{{R_NS}}}link")
+    if not rel_id:
+        return "", None
+    return rel_id, relationships.get(rel_id)
+
+
+def _media_kind(extension: str, relationship_type: str = "") -> str:
+    if relationship_type.endswith("/video"):
+        return "video"
+    if relationship_type.endswith("/audio"):
+        return "audio"
+    if extension == ".gif":
+        return "gif"
+    if extension in {".mp4", ".mov", ".m4v", ".avi", ".wmv", ".webm", ".mpeg", ".mpg"}:
+        return "video"
+    if extension in {".mp3", ".wav", ".m4a", ".aac", ".wma", ".ogg"}:
+        return "audio"
+    return "image"
 
 
 def _collect_text(element: ET.Element) -> str:
@@ -171,6 +263,8 @@ def _parse_animations(root: ET.Element, objects: list[dict[str, Any]]) -> list[d
             if not target_id:
                 continue
             kind = _classify_animation(element)
+            if not kind:
+                continue
             key = (target_id, kind)
             if key in seen:
                 continue
@@ -185,22 +279,65 @@ def _parse_animations(root: ET.Element, objects: list[dict[str, Any]]) -> list[d
                     "kind": kind,
                     "raw_tag": _local_name(element.tag),
                     "raw_attrs": dict(element.attrib),
-                    "supported": kind in {"appear", "fade", "wipe"},
+                    "supported": kind in SUPPORTED_ANIMATION_KINDS,
                 }
             )
     return animations
 
 
-def _classify_animation(element: ET.Element) -> str:
-    attrs = " ".join(str(value).lower() for value in element.attrib.values())
+def _classify_animation(element: ET.Element) -> str | None:
+    attrs_by_name = {
+        str(key).lower(): str(value).lower()
+        for key, value in element.attrib.items()
+    }
+    attrs = " ".join(attrs_by_name.values())
+    effect_filter = attrs_by_name.get("filter", "")
+    transition = attrs_by_name.get("transition", "")
     tag = _local_name(element.tag)
+    if tag == "anim":
+        return _classify_numeric_animation(element)
     if "fade" in attrs:
         return "fade"
     if "wipe" in attrs:
         return "wipe"
+    if "blinds" in effect_filter:
+        return "blinds"
+    if "wheel" in effect_filter:
+        if transition == "out":
+            return "wheel_out"
+        return "wheel_in"
     if tag == "set" or "entr" in attrs or "appear" in attrs:
         return "appear"
     return tag
+
+
+def _classify_numeric_animation(element: ET.Element) -> str | None:
+    attr_names = [
+        (node.text or "").strip()
+        for node in element.findall(f".//{{{P_NS}}}attrName")
+        if (node.text or "").strip()
+    ]
+    attrs = set(attr_names)
+    if not attrs or not attrs.issubset({"ppt_x", "ppt_y"}):
+        return "anim"
+
+    values = [
+        _normalize_animation_value(node.attrib.get("val", ""))
+        for node in element.findall(f".//{{{P_NS}}}strVal")
+    ]
+    values = [value for value in values if value]
+    if len(set(values)) <= 1:
+        return None
+
+    if attrs == {"ppt_x"}:
+        return "motion_x"
+    if attrs == {"ppt_y"}:
+        return "motion_y"
+    return "motion"
+
+
+def _normalize_animation_value(value: str) -> str:
+    return str(value).strip().lower().lstrip("#").replace(" ", "")
 
 
 def _parse_notes(package: zipfile.ZipFile, slide_path: str) -> str:

@@ -11,7 +11,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 TEST_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BACKEND_DIR))
 sys.path.insert(0, str(TEST_DIR))
-TMP_ROOT = Path(__file__).resolve().parents[1] / "workspace" / "test_runs"
+TMP_ROOT = Path(__file__).resolve().parent / ".tmp_runs"
 TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 from converter import convert_pptx
@@ -45,9 +45,14 @@ class V3SlideAnalyzerTest(unittest.TestCase):
         self.assertEqual(analysis["page"], {"width": 12192000, "height": 6858000})
         self.assertEqual(slide["object_count"], 3)
         self.assertEqual(slide["text_box_count"], 3)
+        self.assertEqual(len(slide["object_boxes"]), 3)
+        self.assertEqual(slide["object_boxes"][0]["id"], "2")
+        self.assertEqual(slide["object_boxes"][0]["bbox"]["w"], 5000000)
         self.assertEqual(slide["animation_target_count"], 2)
         self.assertTrue(slide["notes_present"])
         self.assertEqual([step["target_text"] for step in slide["animation_steps"]], ["当前位置", "最终公式"])
+        self.assertEqual(slide["animation_steps"][1]["covered_objects"][0]["text"], "当前位置")
+        self.assertEqual(slide["animation_steps"][1]["covered_objects"][0]["bbox"]["x"], 100000)
         self.assertGreater(slide["metrics"]["object_coverage_ratio"], 0)
         self.assertGreater(slide["metrics"]["max_object_overlap_ratio"], 0.3)
         self.assertEqual(slide["crowding"], "high")
@@ -66,7 +71,7 @@ class V3SlideAnalyzerTest(unittest.TestCase):
             analysis = json.loads(Path(result["analysis_path"]).read_text(encoding="utf-8"))
             report = json.loads(Path(result["report_path"]).read_text(encoding="utf-8"))
             self.assertEqual(analysis["version"], "v3b")
-            self.assertEqual(report["version"], "v3d")
+            self.assertEqual(report["version"], "v3g")
             self.assertEqual(report["outputs"]["analysis_json"], "analysis.json")
             self.assertEqual(report["outputs"]["augment_plan_json"], "augment_plan.json")
             self.assertEqual(report["summary"]["high_crowding_pages"], [1])

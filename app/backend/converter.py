@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 from augment_planner import build_augment_plan
+from compare_builder import write_compare_html
 from html_renderer import write_study_html
+from media_processor import process_presentation_media
+from metrics_builder import build_metrics, write_metrics
 from native_converter import convert_pptx_to_pdf
+from object_reflow_planner import simulate_operations
 from pdf_augmenter import generate_guide_pdf
 from pptx_parser import parse_pptx
+from reflow_visual_check import check_reflow_intent
 from slide_analyzer import analyze_presentation, summarize_analysis
 from study_builder import build_study_document
 
@@ -21,6 +27,7 @@ def convert_pptx(
     soffice_path: str | Path | None = None,
     command_runner=None,
 ) -> dict[str, Any]:
+    started_at = time.perf_counter()
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
@@ -30,7 +37,10 @@ def convert_pptx(
 
     report_path = output / "report.json"
     analysis_path = output / "analysis.json"
+    metrics_path = output / "metrics.json"
+    compare_html_path = output / "compare.html"
     preview_html_path = output / "preview.html"
+    media_manifest_path = output / "media_manifest.json"
 
     warnings = [
         warning
@@ -39,6 +49,7 @@ def convert_pptx(
     ]
 
     plan = build_augment_plan(analysis)
+    media_manifest = process_presentation_media(pptx_path, presentation, output)
     base_pdf_path = None
     guide_pdf_path = None
     augment_plan_path = output / "augment_plan.json"
@@ -54,6 +65,7 @@ def convert_pptx(
             output,
             plan,
             base_pdf_path=base_pdf_path,
+            media_manifest=media_manifest,
             soffice_path=soffice_path,
             command_runner=command_runner,
         )
@@ -70,35 +82,84 @@ def convert_pptx(
         json.dumps(analysis, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    metrics = build_metrics(
+        analysis,
+        plan,
+        runtime_seconds=time.perf_counter() - started_at,
+    )
+    write_metrics(metrics_path, metrics)
+    reflow_intent_check = _build_reflow_intent_check(plan)
 
     report = {
         "kind": "conversion_report",
-        "version": "v3d",
+        "version": "v3g",
         "source": document["source"],
         "outputs": {
             "base_pdf": "base.pdf" if base_pdf_path else None,
             "guide_pdf": "guide.pdf" if guide_pdf_path else None,
+            "compare_html": "compare.html" if base_pdf_path and guide_pdf_path else None,
             "analysis_json": "analysis.json",
             "augment_plan_json": "augment_plan.json",
+            "metrics_json": "metrics.json",
+            "media_manifest_json": "media_manifest.json",
             "preview_html": "preview.html",
             "report": "report.json",
         },
         "summary": summarize_analysis(analysis),
+        "media": media_manifest,
+        "reflow_intent_check": reflow_intent_check,
         "warnings": warnings,
     }
     report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    if base_pdf_path and guide_pdf_path:
+        write_compare_html(
+            compare_html_path,
+            source=document["source"],
+            plan=plan,
+            metrics=metrics,
+            report=report,
+        )
 
     return {
         "status": "ok",
         "source": document["source"],
         "base_pdf_path": str(base_pdf_path) if base_pdf_path else None,
         "guide_pdf_path": str(guide_pdf_path) if guide_pdf_path else None,
+        "compare_html_path": str(compare_html_path) if base_pdf_path and guide_pdf_path else None,
         "analysis_path": str(analysis_path),
         "augment_plan_path": str(augment_plan_path),
+        "metrics_path": str(metrics_path),
+        "media_manifest_path": str(media_manifest_path),
         "report_path": str(report_path),
         "preview_html_path": str(preview_html_path),
         "warnings": warnings,
+    }
+
+
+def _build_reflow_intent_check(plan: dict[str, Any]) -> dict[str, Any]:
+    slide_checks: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for slide in plan.get("slides", []):
+        reflow = slide.get("object_reflow") or {}
+        operations = reflow.get("operations") or []
+        if not operations:
+            continue
+        before_boxes = slide.get("object_boxes") or []
+        after_boxes = simulate_operations(before_boxes, operations)
+        check = check_reflow_intent(
+            before_boxes,
+            after_boxes,
+            operations,
+            slide.get("size") or {},
+        )
+        slide_number = slide.get("source_slide")
+        slide_checks.append({"slide": slide_number, **check})
+        warnings.extend(f"第 {slide_number} 页：{warning}" for warning in check.get("warnings", []))
+    return {
+        "passed": not warnings,
+        "warnings": warnings,
+        "slides": slide_checks,
     }

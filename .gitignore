@@ -1,12 +1,18 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
 *$py.class
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pyrightcache/
+.hypothesis/
+.tox/
 .coverage
+coverage.xml
 htmlcov/
+*.egg-info/
 
 # Virtual environments
 .venv/
@@ -17,26 +23,33 @@ env/
 node_modules/
 dist/
 build/
+coverage/
+playwright-report/
+test-results/
 
 # Project runtime outputs
 app/workspace/
 app/.tmp_tests/
 app/tmp_tests_plain/
+app/tests/.tmp_runs/
+app/tests/.tmp_*/
 
 # Local configuration and secrets
 .env
 .env.*
 !.env.example
 
-# Logs and temporary files
+# Logs, Office locks, and temporary files
 *.log
 *.tmp
 *.temp
-~$*.ppt
-~$*.pptx
+*.bak
+~$*
+.~lock.*#
 
 # Editor / OS noise
 .DS_Store
 Thumbs.db
+desktop.ini
 .vscode/
 .idea/

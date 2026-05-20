@@ -9,7 +9,7 @@ from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
-TMP_ROOT = Path(__file__).resolve().parents[1] / "workspace" / "test_runs"
+TMP_ROOT = Path(__file__).resolve().parent / ".tmp_runs"
 TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 from html_renderer import render_study_html
@@ -114,6 +114,76 @@ def write_minimal_pptx(path: Path) -> None:
         package.writestr("ppt/notesSlides/notesSlide1.xml", notes_xml)
 
 
+def write_filter_effect_pptx(path: Path) -> None:
+    slide_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}" xmlns:r="{R_NS}">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Blinds"/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2000000" cy="600000"/></a:xfrm></p:spPr>
+        <p:txBody><a:p><a:r><a:t>百叶对象</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Wheel"/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="800000"/><a:ext cx="2000000" cy="600000"/></a:xfrm></p:spPr>
+        <p:txBody><a:p><a:r><a:t>轮状对象</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="4" name="RawAnim"/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="1600000"/><a:ext cx="2000000" cy="600000"/></a:xfrm></p:spPr>
+        <p:txBody><a:p><a:r><a:t>未知数值动画</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:timing>
+    <p:tnLst>
+      <p:par>
+        <p:cTn id="1">
+          <p:childTnLst>
+            <p:seq>
+              <p:cTn id="2">
+                <p:childTnLst>
+                  <p:par><p:cTn id="3"><p:childTnLst>
+                    <p:animEffect transition="in" filter="blinds(horizontal)">
+                      <p:cBhvr><p:cTn id="4"/><p:tgtEl><p:spTgt spid="2"/></p:tgtEl></p:cBhvr>
+                    </p:animEffect>
+                  </p:childTnLst></p:cTn></p:par>
+                  <p:par><p:cTn id="5"><p:childTnLst>
+                    <p:animEffect transition="out" filter="wheel(1)">
+                      <p:cBhvr><p:cTn id="6"/><p:tgtEl><p:spTgt spid="3"/></p:tgtEl></p:cBhvr>
+                    </p:animEffect>
+                  </p:childTnLst></p:cTn></p:par>
+                  <p:par><p:cTn id="7"><p:childTnLst>
+                    <p:anim calcmode="lin" valueType="num">
+                      <p:cBhvr><p:cTn id="8"/><p:tgtEl><p:spTgt spid="4"/></p:tgtEl><p:attrNameLst><p:attrName>ppt_x</p:attrName></p:attrNameLst></p:cBhvr>
+                      <p:tavLst><p:tav tm="0"><p:val><p:strVal val="ppt_x"/></p:val></p:tav><p:tav tm="100000"><p:val><p:strVal val="ppt_x"/></p:val></p:tav></p:tavLst>
+                    </p:anim>
+                  </p:childTnLst></p:cTn></p:par>
+                  <p:par><p:cTn id="9"><p:childTnLst>
+                    <p:anim calcmode="lin" valueType="num">
+                      <p:cBhvr><p:cTn id="10"/><p:tgtEl><p:spTgt spid="4"/></p:tgtEl><p:attrNameLst><p:attrName>ppt_y</p:attrName></p:attrNameLst></p:cBhvr>
+                      <p:tavLst><p:tav tm="0"><p:val><p:strVal val="ppt_y"/></p:val></p:tav><p:tav tm="100000"><p:val><p:strVal val="1+ppt_h/2"/></p:val></p:tav></p:tavLst>
+                    </p:anim>
+                  </p:childTnLst></p:cTn></p:par>
+                </p:childTnLst>
+              </p:cTn>
+            </p:seq>
+          </p:childTnLst>
+        </p:cTn>
+      </p:par>
+    </p:tnLst>
+  </p:timing>
+</p:sld>
+"""
+    with zipfile.ZipFile(path, "w") as package:
+        package.writestr("[Content_Types].xml", "<Types/>")
+        package.writestr("ppt/presentation.xml", "<p:presentation xmlns:p='%s'/>" % P_NS)
+        package.writestr("ppt/slides/slide1.xml", slide_xml)
+
+
 class V2PipelineTest(unittest.TestCase):
     def test_parse_pptx_extracts_objects_notes_and_basic_animation_order(self):
         with workspace_tmpdir() as tmp:
@@ -129,6 +199,28 @@ class V2PipelineTest(unittest.TestCase):
         self.assertIn("先展示问题", slide["notes"])
         self.assertEqual([anim["target_id"] for anim in slide["animations"]], ["3", "4"])
         self.assertEqual([anim["kind"] for anim in slide["animations"]], ["fade", "wipe"])
+
+    def test_parse_pptx_supports_known_filter_effects_and_numeric_position_motion(self):
+        with workspace_tmpdir() as tmp:
+            pptx_path = tmp / "filters.pptx"
+            write_filter_effect_pptx(pptx_path)
+
+            presentation = parse_pptx(pptx_path)
+
+        animations = presentation["slides"][0]["animations"]
+        self.assertEqual([anim["kind"] for anim in animations], ["blinds", "wheel_out", "motion_y"])
+        self.assertEqual([anim["supported"] for anim in animations], [True, True, True])
+        document_slide = build_study_document(presentation)["slides"][0]
+        summaries = [step["summary"] for step in document_slide["steps"]]
+        self.assertIn("百叶", summaries[0])
+        self.assertIn("轮状退出", summaries[1])
+        self.assertIn("位置移动", summaries[2])
+        unsupported_warnings = [
+            warning
+            for warning in document_slide["warnings"]
+            if warning["code"] == "unsupported_animation"
+        ]
+        self.assertEqual(unsupported_warnings, [])
 
     def test_parse_pptx_rejects_non_pptx_zip_structure(self):
         with workspace_tmpdir() as tmp:

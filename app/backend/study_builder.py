@@ -66,9 +66,17 @@ def _step_summary(animation: dict[str, Any]) -> str:
         return f"淡入展示“{target}”，通常用于引入新概念。"
     if kind == "wipe":
         return f"擦除展示“{target}”，通常表示按顺序展开。"
+    if kind == "blinds":
+        return f"百叶展开“{target}”，通常表示分段引入内容。"
+    if kind == "wheel_in":
+        return f"轮状出现“{target}”，作为当前讲解步骤。"
+    if kind == "wheel_out":
+        return f"轮状退出“{target}”，表示该对象离开当前讲解焦点。"
+    if kind in {"motion", "motion_x", "motion_y"}:
+        return f"位置移动“{target}”，表示该对象在页面中改变位置。"
     if kind == "appear":
         return f"出现“{target}”，作为当前讲解步骤。"
-    return f"检测到暂不支持的动画“{kind}”，保留为问题提示。"
+    return f"识别到数值动画“{kind}”，保留原生画面并列入复核。"
 
 
 def _detect_warnings(slide: dict[str, Any]) -> list[dict[str, str]]:
@@ -79,7 +87,7 @@ def _detect_warnings(slide: dict[str, Any]) -> list[dict[str, str]]:
             warnings.append(
                 {
                     "code": "unsupported_animation",
-                    "message": f"暂不支持动画 {animation.get('kind')}，已保留对象文本。",
+                    "message": f"已识别 {animation.get('kind')} 数值动画；终态坐标不稳定，保留原生画面并列入复核。",
                 }
             )
     if not slide.get("notes"):

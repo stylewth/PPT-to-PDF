@@ -10,7 +10,7 @@ from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND_DIR))
-TMP_ROOT = Path(__file__).resolve().parents[1] / "workspace" / "test_runs"
+TMP_ROOT = Path(__file__).resolve().parent / ".tmp_runs"
 TMP_ROOT.mkdir(parents=True, exist_ok=True)
 SAMPLE_PPTX = Path(__file__).resolve().parents[1] / "samples" / "course_animation_occlusion.pptx"
 
@@ -40,7 +40,7 @@ class FakeSofficeRunner:
         if self.returncode == 0:
             outdir = Path(command[command.index("--outdir") + 1])
             source = Path(command[-1])
-            (outdir / f"{source.stem}.pdf").write_bytes(b"%PDF-1.7\n%fake native pdf\n")
+            _write_valid_pdf(outdir / f"{source.stem}.pdf")
         return subprocess.CompletedProcess(
             command,
             self.returncode,
@@ -104,12 +104,24 @@ class V3NativeConverterTest(unittest.TestCase):
             self.assertTrue(Path(result["preview_html_path"]).exists())
 
             report = json.loads(Path(result["report_path"]).read_text(encoding="utf-8"))
-            self.assertEqual(report["version"], "v3d")
+            self.assertEqual(report["version"], "v3g")
             self.assertEqual(report["outputs"]["base_pdf"], "base.pdf")
             self.assertEqual(report["outputs"]["guide_pdf"], "guide.pdf")
             self.assertEqual(report["outputs"]["analysis_json"], "analysis.json")
             self.assertEqual(report["outputs"]["augment_plan_json"], "augment_plan.json")
+            self.assertIn("reflow_intent_check", report)
+            self.assertIn("passed", report["reflow_intent_check"])
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _write_valid_pdf(path: Path) -> None:
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=720, height=405)
+    page.insert_text((72, 72), "fake native pdf")
+    doc.save(path)
+    doc.close()

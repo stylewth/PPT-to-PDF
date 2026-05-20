@@ -2,8 +2,50 @@
 workspace/
 .tmp_tests/
 tmp_tests_plain/
+tests/.tmp_runs/
+tests/.tmp_*/
 
-# Python caches created when running tests from this directory
+# Python caches and local tooling
 __pycache__/
 *.py[cod]
+*.pyo
+*$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyrightcache/
+.hypothesis/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+
+# Frontend / browser-test outputs
+node_modules/
+frontend/node_modules/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Logs, Office locks, and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+~$*
+.~lock.*#
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
