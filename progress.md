@@ -221,3 +221,39 @@
 | Web 验收 | 已重启 8765，`curl.exe -s -F "deck=@app/samples/test.pptx" http://127.0.0.1:8765/api/convert` 成功，`job_id=2e422db8f84c4c3d89317f85e0b983b4`。 |
 | 截图验收 | 已渲染并检查 `app/workspace/outputs/2e422db8f84c4c3d89317f85e0b983b4/guide_page1.png` 到 `guide_page4.png`；页 1/2 对象重排保持主线，页 3/4 GIF 关键帧正常替换原媒体区。 |
 | 遇到的问题 | `rg` 在当前环境 Access denied，改用 `git grep`/PowerShell；PowerShell 未指定 UTF-8 读取 JSON 会误解码，已用 `-Encoding UTF8` 复核。 |
+
+## 2026-05-21 渲染门禁执行记录
+| 项目 | 记录 |
+|---|---|
+| 用户要求 | 执行下一步修改方案，根治公式乱码、遮挡和复杂页视觉退化。 |
+| 执行约束 | 不新建分支/worktree；`executing-plans` 的子代理/worktree要求与当前约束冲突，本轮在当前工作区执行。 |
+| 当前阶段 | 先做渲染截图门禁，再进入公式和复杂页修复。 |
+| 渲染门禁 | 新增 `render_visual_check.py`，转换后渲染 `guide.pdf` 重点页截图，并把 `render_visual_check` 写入 `report.json`。 |
+| 公式修复 | 移动公式使用 PPTX fallback 预览并保持比例；稳定公式先做最终渲染检测，只修检测失败的公式，避免正常公式被重绘弄坏。 |
+| 复杂页处理 | 对象级重排新增质量门禁；第 35 页这类重排失败且贴近页底的页面改用整页轻微缩放，保留原页面关系。 |
+| 最新 test 输出 | `job_id=43391fbca818462390cde4653969ee00`，`render_visual_check.passed=true`，warnings 为空。 |
+| 最新 review 输出 | `job_id=51ce3af78f45491a9e4fc020dbb3e25b`，`render_visual_check.passed=true`，warnings 为空。 |
+| 验证 | `python -m unittest discover -s app\tests` 95 项通过；`python -m compileall app\backend` 通过；已重启 8765 并重新转换 `test.pptx` 和 `Review+chapter24-27.pptx`。 |
+
+## 2026-05-21 组合公式与渲染误报收口
+| 项目 | 记录 |
+|---|---|
+| 根因修正 | 解析和重排链路保留 `grpSp` 内公式对象；行内公式占位不再被当作可搬移视觉块。 |
+| fallback 保护 | 稳定公式修复前会检查 fallback 预览是否可用，避免第 28 页这种坏预览覆盖正常原生渲染。 |
+| 门禁收紧 | 渲染门禁新增单色公式拥挤检测，同时放过正常分式横线和高亮公式，减少误报。 |
+| 最新 test 输出 | `job_id=027b583b047646b68e882e9483b85593`，`render_visual_check.passed=true`，warnings 为空。 |
+| 最新 review 输出 | `job_id=589f1b6da5984629907ea69494666f61`，`render_visual_check.passed=true`，warnings 为空。 |
+| 截图复核 | 已检查 Review 第 4、22、23、28、35 页最新 PNG；第 4 页遮挡解除，第 22 页保持行内公式，第 28 页公式不再糊，第 35 页缩放后底部可读。 |
+| 验证 | `python -m unittest discover -s app\tests` 103 项通过；`python -m compileall app\backend` 通过；已重启 8765 并重新转换两个样例。 |
+
+## 2026-05-22 电路图碎片化与短数学文本收口
+| 项目 | 记录 |
+|---|---|
+| 第 36 页根因 | 对象级重排误把电路图小图元当独立对象移动，导致电阻、导线和标签语义关系被拆散。 |
+| 第 36 页修复 | `object_reflow_planner` 新增图元碎片化质量门禁；该页最新计划为 `native_compact`，对象级重排操作数为 0。 |
+| 第 23 页根因 | `a < r < b:`、`r > b` 这类短数学条件文本框被 LibreOffice 自动换行，不是页码专属问题。 |
+| 第 23 页修复 | 新增短数学文本框保护，生成 guide deck 时设置不换行并安全扩宽文本框。 |
+| 最新 test 输出 | `job_id=a03c2c3d9d8149809e936ea33b80c898`，`render_visual_check.passed=true`，warnings 为空。 |
+| 最新 review 输出 | `job_id=5ee2eb6737df49ae993921331840564d`，`render_visual_check.passed=true`，warnings 为空。 |
+| 截图复核 | 已打开 Review 第 4、23、35、36 页最新 PNG；第 36 页电路图未拆散，第 23 页条件文本恢复单行，公式主体比 base 清楚。 |
+| 验证 | `python -m unittest discover -s app\tests` 106 项通过；`python -m compileall app\backend` 通过；已重启 8765 并重新转换两个样例。 |

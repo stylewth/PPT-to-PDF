@@ -16,21 +16,31 @@ def plan_object_reflow(slide: dict[str, Any]) -> dict[str, Any]:
     objects = _objects(slide)
     graph = build_overlap_graph(slide)
     semantic_groups = build_reflow_groups(slide)
-    candidate_ids = _candidate_ids(graph, objects, slide, page_height, semantic_groups)
+    candidate_ids = _candidate_ids(graph, objects, slide, page_width, page_height, semantic_groups)
     if not candidate_ids:
         return {"type": "object_reflow", "operations": [], "overlap_graph": graph, "semantic_groups": semantic_groups}
 
     candidates = [obj for obj in objects if obj["id"] in candidate_ids]
-    stable = [obj for obj in objects if obj["id"] not in candidate_ids]
+    stable = [
+        obj
+        for obj in objects
+        if obj["id"] not in candidate_ids and not _is_passive_group_visual(obj)
+    ]
     operations = _pack_candidates(candidates, stable, page_width, page_height, semantic_groups)
-    after_boxes = simulate_operations(slide.get("object_boxes", []), operations)
+    before_boxes = slide.get("object_boxes", [])
+    after_boxes = simulate_operations(before_boxes, operations)
+    quality_gate = _reflow_quality_gate(before_boxes, after_boxes, operations, page_width, page_height)
+    if not quality_gate["passed"]:
+        operations = []
+        after_boxes = before_boxes
 
     return {
         "type": "object_reflow",
         "policy": "move_shapes_then_convert",
         "overlap_graph": graph,
         "semantic_groups": semantic_groups,
-        "before_max_overlap_ratio": max_overlap_ratio(slide.get("object_boxes", [])),
+        "quality_gate": quality_gate,
+        "before_max_overlap_ratio": max_overlap_ratio(before_boxes),
         "after_max_overlap_ratio": max_overlap_ratio(after_boxes),
         "operations": operations,
     }
@@ -64,10 +74,94 @@ def max_overlap_ratio(boxes: list[dict[str, Any]]) -> float:
     return maximum
 
 
+def _reflow_quality_gate(
+    before_boxes: list[dict[str, Any]],
+    after_boxes: list[dict[str, Any]],
+    operations: list[dict[str, Any]],
+    page_width: int = DEFAULT_PAGE["width"],
+    page_height: int = DEFAULT_PAGE["height"],
+) -> dict[str, Any]:
+    if not operations:
+        return {"passed": True}
+    moved_ids = {
+        str(operation.get("id") or "")
+        for operation in operations
+        if operation.get("op") in {"move_resize", "move", "resize"}
+    }
+    before_global = max_overlap_ratio(before_boxes)
+    after_global = max_overlap_ratio(after_boxes)
+    before_moved = _max_overlap_for_ids(before_boxes, moved_ids)
+    after_moved = _max_overlap_for_ids(after_boxes, moved_ids)
+    global_ok = after_global <= 0.08 or after_global <= before_global * 0.92
+    moved_ok = after_moved <= 0.08 or after_moved <= before_moved * 0.92
+    diagram_fragmentation = _diagram_fragmentation_risk(before_boxes, operations, page_width, page_height)
+    passed = not diagram_fragmentation and ((global_ok and moved_ok) or (moved_ok and len(operations) <= 3))
+    return {
+        "passed": passed,
+        "before_global_overlap": before_global,
+        "after_global_overlap": after_global,
+        "before_moved_overlap": before_moved,
+        "after_moved_overlap": after_moved,
+        **(
+            {}
+            if passed
+            else {
+                "reason": "diagram primitive fragmentation risk"
+                if diagram_fragmentation
+                else "planned reflow does not reduce rendered-object overlap enough"
+            }
+        ),
+    }
+
+
+def _diagram_fragmentation_risk(
+    before_boxes: list[dict[str, Any]],
+    operations: list[dict[str, Any]],
+    page_width: int,
+    page_height: int,
+) -> bool:
+    moves = [operation for operation in operations if operation.get("op") in {"move_resize", "move", "resize"}]
+    if len(moves) < 8:
+        return False
+    by_id = {str(item.get("id") or ""): item for item in before_boxes}
+    small_primitive_moves = 0
+    long_text_moves = 0
+    for operation in moves:
+        item = by_id.get(str(operation.get("id") or ""), {})
+        text = " ".join(str(item.get("text") or "").split())
+        if len(text) >= 32:
+            long_text_moves += 1
+        box = operation.get("from") or item.get("bbox") or {}
+        if (
+            str(operation.get("object_type") or "") in {"sp", "pic", "cxnSp"}
+            and int(box.get("w", 0)) <= page_width * 0.26
+            and int(box.get("h", 0)) <= page_height * 0.16
+        ):
+            small_primitive_moves += 1
+    return small_primitive_moves >= 8 and long_text_moves <= max(1, len(moves) // 5)
+
+
+def _max_overlap_for_ids(boxes: list[dict[str, Any]], object_ids: set[str]) -> float:
+    records = [_box_record(item) for item in boxes if _box_value(item)]
+    maximum = 0.0
+    for record in records:
+        if record["id"] not in object_ids:
+            continue
+        for other in records:
+            if other["id"] == record["id"]:
+                continue
+            smaller = min(_area(record["bbox"]), _area(other["bbox"]))
+            if not smaller:
+                continue
+            maximum = max(maximum, _overlap_area(record["bbox"], other["bbox"]) / smaller)
+    return maximum
+
+
 def _candidate_ids(
     graph: dict[str, Any],
     objects: list[dict[str, Any]],
     slide: dict[str, Any],
+    page_width: int,
     page_height: int,
     semantic_groups: list[dict[str, Any]],
 ) -> set[str]:
@@ -84,6 +178,14 @@ def _candidate_ids(
             continue
         front_visual = _is_visual(front)
         back_visual = _is_visual(back)
+        reasons = set(edge.get("reasons") or [])
+        if (
+            not front_visual
+            and not back_visual
+            and "animation_occlusion" not in reasons
+            and (_is_short_annotation(front, page_width) or _is_short_annotation(back, page_width))
+        ):
+            continue
         if front_visual and not back_visual:
             ids.add(front_id)
         elif not front_visual and back_visual:
@@ -96,7 +198,11 @@ def _candidate_ids(
     for group in semantic_groups:
         for visual_id in group.get("visual_ids", []):
             ids.add(str(visual_id))
-    return {item for item in ids if item}
+    return {
+        item
+        for item in ids
+        if item and not bool((by_id.get(item) or {}).get("inline_formula_placeholder"))
+    }
 
 
 def _has_text(obj: dict[str, Any]) -> bool:
@@ -116,6 +222,12 @@ def _is_body_object(obj: dict[str, Any], page_height: int) -> bool:
     return True
 
 
+def _is_short_annotation(obj: dict[str, Any], page_width: int) -> bool:
+    text = " ".join(str(obj.get("text") or "").split())
+    box = obj["bbox"]
+    return bool(text) and len(text) <= 24 and box["w"] <= page_width * 0.32
+
+
 def _pack_candidates(
     candidates: list[dict[str, Any]],
     stable: list[dict[str, Any]],
@@ -127,7 +239,13 @@ def _pack_candidates(
         return []
     text_candidates = [obj for obj in candidates if _has_text(obj)]
     visual_candidates = [obj for obj in candidates if _is_visual(obj)]
-    stable_visuals = [obj for obj in stable if _is_visual(obj) and _is_body_object(obj, page_height)]
+    stable_visuals = [
+        obj
+        for obj in stable
+        if _is_visual(obj)
+        and _is_body_object(obj, page_height)
+        and not bool(obj.get("inline_formula_placeholder"))
+    ]
     associations = _associate_visuals(text_candidates, visual_candidates + stable_visuals, page_width, page_height)
     associations.update(_semantic_associations(semantic_groups or [], text_candidates + stable, visual_candidates + stable_visuals))
     associated_ids = set(associations)
@@ -184,13 +302,14 @@ def _repair_text_overlaps_locally(
     placed = [dict(obj["bbox"]) for obj in stable]
     for obj in candidates:
         original = obj["bbox"]
+        top_limit = _text_top_limit(original, page_height, margin)
         target = {
             "x": _clamp(original["x"], margin, page_width - margin - original["w"]),
-            "y": _clamp(next_y, margin, bottom_limit - original["h"]),
+            "y": _clamp(next_y, top_limit, bottom_limit - original["h"]),
             "w": original["w"],
             "h": original["h"],
         }
-        target = _avoid_text_collisions(target, placed, margin, page_width, bottom_limit, gap)
+        target = _avoid_text_collisions(target, placed, top_limit, page_width, bottom_limit, gap)
         placed.append(target)
         next_y = target["y"] + target["h"] + gap
         if _changed(original, target):
@@ -205,6 +324,117 @@ def _repair_text_overlaps_locally(
                 }
             )
     return operations
+
+
+def _refine_moved_text_collisions(
+    operations: list[dict[str, Any]],
+    objects: list[dict[str, Any]],
+    page_width: int,
+    page_height: int,
+) -> list[dict[str, Any]]:
+    if not operations:
+        return operations
+    by_id = {obj["id"]: obj for obj in objects}
+    op_by_id = {str(operation.get("id") or ""): operation for operation in operations if operation.get("op") == "move_resize"}
+    margin = max(120000, int(page_width * 0.012))
+    gap = max(220000, int(page_width * 0.018))
+    bottom_limit = page_height - max(margin, int(page_height * 0.08))
+    for _ in range(4):
+        final_boxes = {obj["id"]: dict(obj["bbox"]) for obj in objects}
+        for object_id, operation in op_by_id.items():
+            final_boxes[object_id] = dict(operation.get("to") or final_boxes.get(object_id, {}))
+        changed = False
+        moved_text_ids = [
+            object_id
+            for object_id, operation in op_by_id.items()
+            if _has_text(by_id.get(object_id, {})) and str(operation.get("object_type") or "") not in {"pic", "graphicFrame"}
+        ]
+        for object_id in moved_text_ids:
+            current = final_boxes[object_id]
+            worst = max(
+                (
+                    _overlap_ratio(current, box)
+                    for other_id, box in final_boxes.items()
+                    if other_id != object_id and _area(box)
+                ),
+                default=0.0,
+            )
+            if worst <= 0.02:
+                continue
+            placed = [box for other_id, box in final_boxes.items() if other_id != object_id and _area(box)]
+            peer_text = [
+                box
+                for other_id, box in final_boxes.items()
+                if other_id != object_id and other_id in moved_text_ids and _area(box)
+            ]
+            original = by_id[object_id]["bbox"]
+            target = _best_text_target(current, original, placed, peer_text, _text_top_limit(original, page_height, margin), page_width, bottom_limit, gap)
+            if _changed(current, target):
+                op_by_id[object_id]["to"] = target
+                changed = True
+        if not changed:
+            break
+    return operations
+
+
+def _best_text_target(
+    current: dict[str, int],
+    original: dict[str, int],
+    placed: list[dict[str, int]],
+    peer_text: list[dict[str, int]],
+    top_limit: int,
+    page_width: int,
+    bottom_limit: int,
+    gap: int,
+) -> dict[str, int]:
+    margin = max(120000, int(page_width * 0.012))
+    width = current["w"]
+    height = current["h"]
+    candidates = [
+        dict(current),
+        {
+            "x": _clamp(original["x"], margin, page_width - margin - width),
+            "y": _clamp(original["y"], top_limit, bottom_limit - height),
+            "w": width,
+            "h": height,
+        },
+    ]
+    for box in placed:
+        candidates.extend(
+            [
+                {"x": current["x"], "y": box["y"] - gap - height, "w": width, "h": height},
+                {"x": current["x"], "y": box["y"] + box["h"] + gap, "w": width, "h": height},
+                {"x": box["x"] - gap - width, "y": current["y"], "w": width, "h": height},
+                {"x": box["x"] + box["w"] + gap, "y": current["y"], "w": width, "h": height},
+                {"x": original["x"], "y": box["y"] - gap - height, "w": width, "h": height},
+                {"x": original["x"], "y": box["y"] + box["h"] + gap, "w": width, "h": height},
+            ]
+        )
+    scored: list[tuple[float, dict[str, int]]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for candidate in candidates:
+        candidate = {
+            "x": _clamp(candidate["x"], margin, page_width - margin - width),
+            "y": _clamp(candidate["y"], top_limit, bottom_limit - height),
+            "w": width,
+            "h": height,
+        }
+        key = (candidate["x"], candidate["y"], candidate["w"], candidate["h"])
+        if key in seen:
+            continue
+        seen.add(key)
+        overlap = max((_overlap_ratio(candidate, box) for box in placed), default=0.0)
+        peer_overlap = max((_overlap_ratio(candidate, box) for box in peer_text), default=0.0)
+        movement = _center_distance(candidate, original)
+        current_movement = _center_distance(candidate, current)
+        scored.append((peer_overlap * page_width * 80 + overlap * page_width * 20 + movement * 0.35 + current_movement * 0.10, candidate))
+    return min(scored, key=lambda item: item[0])[1] if scored else current
+
+
+def _text_top_limit(original: dict[str, int], page_height: int, margin: int) -> int:
+    if original["y"] < page_height * 0.18:
+        return margin
+    return max(margin, int(page_height * 0.18))
 
 
 def _repair_loose_visuals_locally(
@@ -229,7 +459,17 @@ def _repair_loose_visuals_locally(
         )
         target_w = max(1, int(original["w"] * scale))
         target_h = max(1, int(original["h"] * scale))
-        target = _local_visual_target(original, target_w, target_h, placed, margin, page_width, bottom_limit, gap)
+        target = _local_visual_target(
+            original,
+            target_w,
+            target_h,
+            placed,
+            margin,
+            page_width,
+            bottom_limit,
+            gap,
+            allow_scale=True,
+        )
         placed.append(target)
         if _changed(original, target):
             operations.append(
@@ -309,56 +549,93 @@ def _target_near_anchor(
     if preserve_geometry and original_side == "below":
         vertical_room = _vertical_room_below(anchor_target, placed, bottom_limit)
         if vertical_room < original["h"]:
-            scale = max(0.62, vertical_room / max(1, original["h"]))
+            scale = max(0.65, vertical_room / max(1, original["h"]))
     right_x = anchor_target["x"] + anchor_target["w"] + gap
     right_width = page_width - margin - right_x
     if right_width > page_width * 0.10 and not preserve_geometry:
         scale = min(scale, right_width / max(1, original["w"]))
-    target_w = max(1, int(original["w"] * scale))
-    target_h = max(1, int(original["h"] * scale))
-
-    candidates = _visual_position_candidates(
-        original,
-        anchor_original,
-        anchor_target,
-        target_w,
-        target_h,
-        margin,
-        page_width,
-        bottom_limit,
-        gap,
-    )
+    scale_options = _visual_scale_options(scale, preserve_geometry)
     scored: list[tuple[float, dict[str, int]]] = []
-    for candidate in candidates:
-        adjusted = _avoid_visual_collisions(
-            candidate,
-            placed,
+    for option in scale_options:
+        target_w = max(1, int(original["w"] * option))
+        target_h = max(1, int(original["h"] * option))
+        candidates = _visual_position_candidates(
+            original,
+            anchor_original,
+            anchor_target,
+            target_w,
+            target_h,
             margin,
             page_width,
             bottom_limit,
             gap,
-            allow_scale=True,
         )
-        scored.append(
-            (
-                _visual_candidate_score(adjusted, original, anchor_original, anchor_target, placed, original_side, page_width, page_height),
-                adjusted,
+        if preserve_geometry:
+            original_x = _clamp(original["x"], margin, page_width - margin - target_w)
+            for placed_box in placed:
+                candidates.extend(
+                    [
+                        {
+                            "x": original_x,
+                            "y": _clamp(placed_box["y"] - gap // 2 - target_h, margin, bottom_limit - target_h),
+                            "w": target_w,
+                            "h": target_h,
+                        },
+                        {
+                            "x": original_x,
+                            "y": _clamp(placed_box["y"] + placed_box["h"] + gap // 2, margin, bottom_limit - target_h),
+                            "w": target_w,
+                            "h": target_h,
+                        },
+                    ]
+                )
+        for candidate in candidates:
+            adjusted = _avoid_visual_collisions(
+                candidate,
+                placed,
+                margin,
+                page_width,
+                bottom_limit,
+                gap,
+                allow_scale=True,
             )
-        )
+            scored.append(
+                (
+                    _visual_candidate_score(adjusted, original, anchor_original, anchor_target, placed, original_side, page_width, page_height),
+                    adjusted,
+                )
+            )
     return min(scored, key=lambda item: item[0])[1]
+
+
+def _visual_scale_options(base_scale: float, preserve_geometry: bool) -> list[float]:
+    lower = 0.65 if preserve_geometry else 0.70
+    values = [min(1.0, max(lower, base_scale))]
+    if preserve_geometry:
+        values.extend([0.85, 0.75, 0.65])
+    result: list[float] = []
+    for value in values:
+        value = min(1.0, max(lower, value))
+        if not any(abs(value - item) < 0.01 for item in result):
+            result.append(value)
+    return result
 
 
 def _avoid_text_collisions(
     target: dict[str, int],
     placed: list[dict[str, int]],
-    margin: int,
+    top_limit: int,
     page_width: int,
     bottom_limit: int,
     gap: int,
 ) -> dict[str, int]:
+    margin = max(120000, int(page_width * 0.012))
     adjusted = dict(target)
     for _ in range(8):
-        previous = next((item for item in placed if _overlap_ratio(adjusted, item) > 0.02), None)
+        overlaps = [(_overlap_ratio(adjusted, item), item) for item in placed]
+        previous = max(overlaps, key=lambda item: item[0])[1] if overlaps else None
+        if previous is not None and _overlap_ratio(adjusted, previous) <= 0.02:
+            previous = None
         if previous is None:
             break
         below = previous["y"] + previous["h"] + gap
@@ -366,20 +643,20 @@ def _avoid_text_collisions(
             adjusted["y"] = below
             continue
         above = previous["y"] - gap - adjusted["h"]
-        if above >= margin:
+        if above >= top_limit:
             adjusted["y"] = above
             continue
         right = previous["x"] + previous["w"] + gap
         if right + adjusted["w"] <= page_width - margin:
             adjusted["x"] = right
-            adjusted["y"] = _clamp(adjusted["y"], margin, bottom_limit - adjusted["h"])
+            adjusted["y"] = _clamp(adjusted["y"], top_limit, bottom_limit - adjusted["h"])
             continue
         left = previous["x"] - gap - adjusted["w"]
         if left >= margin:
             adjusted["x"] = left
-            adjusted["y"] = _clamp(adjusted["y"], margin, bottom_limit - adjusted["h"])
+            adjusted["y"] = _clamp(adjusted["y"], top_limit, bottom_limit - adjusted["h"])
             continue
-        adjusted["y"] = _clamp(below, margin, bottom_limit - adjusted["h"])
+        adjusted["y"] = _clamp(below, top_limit, bottom_limit - adjusted["h"])
     return adjusted
 
 
@@ -392,6 +669,8 @@ def _local_visual_target(
     page_width: int,
     bottom_limit: int,
     gap: int,
+    *,
+    allow_scale: bool,
 ) -> dict[str, int]:
     original_x = _clamp(original["x"], margin, page_width - margin - target_w)
     original_y = _clamp(original["y"], margin, bottom_limit - target_h)
@@ -404,7 +683,7 @@ def _local_visual_target(
     ]
     scored: list[tuple[float, dict[str, int]]] = []
     for box in boxes:
-        adjusted = _avoid_visual_collisions(box, placed, margin, page_width, bottom_limit, gap, allow_scale=True)
+        adjusted = _avoid_visual_collisions(box, placed, margin, page_width, bottom_limit, gap, allow_scale=allow_scale)
         overlap = max([_overlap_ratio(adjusted, item) for item in placed] or [0.0])
         movement = _center_distance(adjusted, original)
         right_bias = page_width * 0.22 if adjusted["x"] + adjusted["w"] / 2 > page_width * 0.70 else 0
@@ -607,10 +886,7 @@ def _avoid_visual_collisions(
         above = previous["y"] - gap // 2 - adjusted["h"]
         if above >= margin:
             adjusted["y"] = above
-            adjusted["x"] = min(
-                max(adjusted["x"], previous["x"] + previous["w"] + gap // 2),
-                page_width - margin - adjusted["w"],
-            )
+            adjusted["x"] = _clamp(adjusted["x"], margin, page_width - margin - adjusted["w"])
             continue
         left = previous["x"] - gap // 2 - adjusted["w"]
         if left >= margin:
@@ -736,9 +1012,34 @@ def _objects(slide: dict[str, Any]) -> list[dict[str, Any]]:
                 "text": str(item.get("text") or (text_item or {}).get("text") or ""),
                 "bbox": {key: int(box[key]) for key in ("x", "y", "w", "h")},
                 "z_order": int(item.get("z_order", index)),
+                "in_group": bool(item.get("in_group")),
             }
         )
+    for obj in result:
+        obj["inline_formula_placeholder"] = _is_inline_formula_placeholder(obj, result)
     return result
+
+
+def _is_passive_group_visual(obj: dict[str, Any]) -> bool:
+    return bool(obj.get("in_group")) and _is_visual(obj) and not bool(obj.get("inline_formula_placeholder"))
+
+
+def _is_inline_formula_placeholder(obj: dict[str, Any], objects: list[dict[str, Any]]) -> bool:
+    if str(obj.get("type") or "") != "graphicFrame" or not bool(obj.get("in_group")):
+        return False
+    box = obj["bbox"]
+    for other in objects:
+        if other["id"] == obj["id"] or not _has_text(other):
+            continue
+        if "\t" not in str(other.get("text") or ""):
+            continue
+        text_box = other["bbox"]
+        vertical_overlap = _axis_overlap(box["y"], box["y"] + box["h"], text_box["y"], text_box["y"] + text_box["h"])
+        if vertical_overlap / max(1, min(box["h"], text_box["h"])) < 0.35:
+            continue
+        if box["w"] <= text_box["w"] * 0.36:
+            return True
+    return False
 
 
 def _box_record(item: dict[str, Any]) -> dict[str, Any]:

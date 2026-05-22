@@ -15,7 +15,7 @@ TMP_ROOT = Path(__file__).resolve().parent / ".tmp_runs"
 TMP_ROOT.mkdir(parents=True, exist_ok=True)
 
 from converter import convert_pptx
-from pptx_parser import parse_pptx
+from pptx_parser import _parse_objects, parse_pptx
 from slide_analyzer import analyze_presentation
 from test_v2_pipeline import write_minimal_pptx
 
@@ -75,6 +75,44 @@ class V3SlideAnalyzerTest(unittest.TestCase):
             self.assertEqual(report["outputs"]["analysis_json"], "analysis.json")
             self.assertEqual(report["outputs"]["augment_plan_json"], "augment_plan.json")
             self.assertEqual(report["summary"]["high_crowding_pages"], [1])
+
+    def test_parse_objects_keeps_grouped_formula_objects(self):
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(GROUPED_OBJECTS_SLIDE_XML)
+
+        objects = _parse_objects(root, {})
+
+        by_id = {item["id"]: item for item in objects}
+        self.assertIn("9", by_id)
+        self.assertEqual(by_id["9"]["type"], "graphicFrame")
+        self.assertEqual(by_id["9"]["bbox"]["x"], 5200000)
+
+
+GROUPED_OBJECTS_SLIDE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+      <p:grpSp>
+        <p:nvGrpSpPr><p:cNvPr id="8" name="Formula group"/></p:nvGrpSpPr>
+        <p:grpSpPr>
+          <a:xfrm>
+            <a:off x="3000000" y="1600000"/><a:ext cx="4200000" cy="1900000"/>
+            <a:chOff x="3000000" y="1600000"/><a:chExt cx="4200000" cy="1900000"/>
+          </a:xfrm>
+        </p:grpSpPr>
+        <p:graphicFrame>
+          <p:nvGraphicFramePr><p:cNvPr id="9" name="Grouped Formula"/></p:nvGraphicFramePr>
+          <p:xfrm><a:off x="5200000" y="2100000"/><a:ext cx="1800000" cy="650000"/></p:xfrm>
+          <a:graphic><a:graphicData><p:oleObj/></a:graphicData></a:graphic>
+        </p:graphicFrame>
+      </p:grpSp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>
+"""
 
 
 if __name__ == "__main__":

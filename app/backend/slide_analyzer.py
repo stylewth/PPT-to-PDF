@@ -79,6 +79,7 @@ def _object_boxes(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "text": obj.get("text", ""),
             "bbox": obj["bbox"],
             "z_order": obj.get("z_order", 0),
+            "in_group": bool(obj.get("in_group")),
         }
         for obj in objects
         if obj.get("bbox")

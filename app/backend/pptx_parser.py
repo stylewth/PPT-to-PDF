@@ -117,16 +117,13 @@ def _parse_objects(root: ET.Element, relationships: dict[str, dict[str, str]] | 
 
     relationships = relationships or {}
     objects: list[dict[str, Any]] = []
-    z_order = 0
-    for child in list(sp_tree):
+    for z_order, (child, transform, in_group) in enumerate(_iter_object_refs(sp_tree)):
         tag = _local_name(child.tag)
-        if tag not in {"sp", "pic", "graphicFrame"}:
-            continue
-        c_nv_pr = child.find(f".//{{{P_NS}}}cNvPr")
+        c_nv_pr = _owner_c_nv_pr(child)
         object_id = c_nv_pr.attrib.get("id", str(z_order + 1)) if c_nv_pr is not None else str(z_order + 1)
         name = c_nv_pr.attrib.get("name", tag) if c_nv_pr is not None else tag
         text = _collect_text(child)
-        bbox = _parse_bbox(child)
+        bbox = _transform_box(_parse_bbox(child), transform)
         item = {
             "id": object_id,
             "name": name,
@@ -134,12 +131,12 @@ def _parse_objects(root: ET.Element, relationships: dict[str, dict[str, str]] | 
             "text": text,
             "bbox": bbox,
             "z_order": z_order,
+            "in_group": in_group,
         }
         media = _parse_object_media(child, relationships)
         if media:
             item["media"] = media
         objects.append(item)
-        z_order += 1
     return objects
 
 
@@ -225,7 +222,11 @@ def _collect_text(element: ET.Element) -> str:
 
 
 def _parse_bbox(element: ET.Element) -> dict[str, int] | None:
-    xfrm = element.find(f".//{{{A_NS}}}xfrm")
+    xfrm = element.find(f"{{{P_NS}}}xfrm") if _local_name(element.tag) == "graphicFrame" else None
+    if xfrm is None:
+        xfrm = element.find(f".//{{{A_NS}}}xfrm")
+    if xfrm is None:
+        xfrm = element.find(f".//{{{P_NS}}}xfrm")
     if xfrm is None:
         return None
     off = xfrm.find(f"{{{A_NS}}}off")
@@ -241,6 +242,81 @@ def _parse_bbox(element: ET.Element) -> dict[str, int] | None:
         }
     except ValueError:
         return None
+
+
+def _iter_object_refs(
+    parent: ET.Element,
+    transform: tuple[float, float, float, float] = (1.0, 1.0, 0.0, 0.0),
+    in_group: bool = False,
+):
+    for child in list(parent):
+        tag = _local_name(child.tag)
+        if tag == "grpSp":
+            group_transform = _compose_transform(transform, _group_transform(child))
+            yield from _iter_object_refs(child, group_transform, True)
+            continue
+        if tag in {"sp", "pic", "graphicFrame"}:
+            yield child, transform, in_group
+
+
+def _owner_c_nv_pr(element: ET.Element) -> ET.Element | None:
+    tag = _local_name(element.tag)
+    if tag == "sp":
+        return element.find(f"{{{P_NS}}}nvSpPr/{{{P_NS}}}cNvPr")
+    if tag == "pic":
+        return element.find(f"{{{P_NS}}}nvPicPr/{{{P_NS}}}cNvPr")
+    if tag == "graphicFrame":
+        return element.find(f"{{{P_NS}}}nvGraphicFramePr/{{{P_NS}}}cNvPr")
+    return None
+
+
+def _group_transform(group: ET.Element) -> tuple[float, float, float, float]:
+    xfrm = group.find(f"{{{P_NS}}}grpSpPr/{{{A_NS}}}xfrm")
+    if xfrm is None:
+        return (1.0, 1.0, 0.0, 0.0)
+    off = xfrm.find(f"{{{A_NS}}}off")
+    ext = xfrm.find(f"{{{A_NS}}}ext")
+    ch_off = xfrm.find(f"{{{A_NS}}}chOff")
+    ch_ext = xfrm.find(f"{{{A_NS}}}chExt")
+    if off is None or ext is None or ch_off is None or ch_ext is None:
+        return (1.0, 1.0, 0.0, 0.0)
+    try:
+        sx = int(ext.attrib.get("cx", "0")) / max(int(ch_ext.attrib.get("cx", "0")), 1)
+        sy = int(ext.attrib.get("cy", "0")) / max(int(ch_ext.attrib.get("cy", "0")), 1)
+        dx = int(off.attrib.get("x", "0")) - int(ch_off.attrib.get("x", "0")) * sx
+        dy = int(off.attrib.get("y", "0")) - int(ch_off.attrib.get("y", "0")) * sy
+        return (sx, sy, dx, dy)
+    except ValueError:
+        return (1.0, 1.0, 0.0, 0.0)
+
+
+def _compose_transform(
+    parent: tuple[float, float, float, float],
+    child: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    psx, psy, pdx, pdy = parent
+    csx, csy, cdx, cdy = child
+    return (
+        psx * csx,
+        psy * csy,
+        pdx + psx * cdx,
+        pdy + psy * cdy,
+    )
+
+
+def _transform_box(
+    box: dict[str, int] | None,
+    transform: tuple[float, float, float, float],
+) -> dict[str, int] | None:
+    if box is None:
+        return None
+    sx, sy, dx, dy = transform
+    return {
+        "x": int(round(box["x"] * sx + dx)),
+        "y": int(round(box["y"] * sy + dy)),
+        "w": int(round(box["w"] * sx)),
+        "h": int(round(box["h"] * sy)),
+    }
 
 
 def _parse_animations(root: ET.Element, objects: list[dict[str, Any]]) -> list[dict[str, Any]]:

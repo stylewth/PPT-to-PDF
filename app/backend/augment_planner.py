@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from layout_decider import annotation_slot, decide_slide_layout, select_annotation_zone
+from layout_decider import decide_slide_layout
 from object_reflow_planner import plan_object_reflow
 
-MAX_INLINE_MARKERS = 3
 MAX_GUIDE_TEXT = 90
 
 
@@ -35,6 +35,11 @@ def build_augment_plan(analysis: dict[str, Any]) -> dict[str, Any]:
                 for slide in slides
                 if slide["strategy"] == "report_only"
             ],
+            "text_box_repair_pages": [
+                slide["source_slide"]
+                for slide in slides
+                if slide["text_box_repairs"]
+            ],
         },
     }
 
@@ -43,8 +48,9 @@ def _plan_slide(slide: dict[str, Any]) -> dict[str, Any]:
     layout = decide_slide_layout(slide)
     strategy = layout["strategy"]
     object_reflow = _object_reflow(slide, strategy)
+    page_compact = _page_compact(slide, object_reflow)
     if strategy == "object_reflow" and not ((object_reflow or {}).get("operations")):
-        strategy = "native_enhance" if slide.get("animation_target_count", 0) > 0 else "keep_native"
+        strategy = "native_compact" if page_compact else "native_enhance" if slide.get("animation_target_count", 0) > 0 else "keep_native"
         object_reflow = None
     return {
         "source_slide": slide.get("number", 0),
@@ -55,40 +61,17 @@ def _plan_slide(slide: dict[str, Any]) -> dict[str, Any]:
         "reason": layout.get("reason", ""),
         "object_boxes": slide.get("object_boxes", []),
         "inline_markers": _inline_markers(slide, strategy),
+        "text_box_repairs": _text_box_repairs(slide),
         "guide_pages": [],
         "micro_reflow": _micro_reflow(slide, strategy),
+        "page_compact": page_compact,
         "object_reflow": object_reflow,
     }
 
 
 def _inline_markers(slide: dict[str, Any], strategy: str) -> list[dict[str, Any]]:
-    if strategy != "native_enhance":
-        return []
-    markers = []
-    steps = slide.get("animation_steps", [])[:MAX_INLINE_MARKERS]
-    zone = select_annotation_zone(slide, marker_count=len(steps))
-    if not zone:
-        return []
-    steps = steps[: min(len(steps), int(zone["capacity"]))]
-    total = len(steps)
-    for index, step in enumerate(steps, start=1):
-        role = _marker_role(index, total, step)
-        markers.append(
-            {
-                "order": index,
-                "label": str(index),
-                "role": role,
-                "hint": _marker_hint(role),
-                "target_id": step.get("target_id", ""),
-                "target_text": step.get("target_text", ""),
-                "kind": step.get("kind", ""),
-                "bbox": step.get("bbox"),
-                "text": _step_text(step),
-                "placement": zone,
-                "hint_box": annotation_slot(zone, index),
-            }
-        )
-    return markers
+    # Page-level animation badges were more distracting than useful for course slides.
+    return []
 
 
 def _micro_reflow(slide: dict[str, Any], strategy: str) -> dict[str, Any] | None:
@@ -113,6 +96,116 @@ def _object_reflow(slide: dict[str, Any], strategy: str) -> dict[str, Any] | Non
     if strategy != "object_reflow":
         return None
     return plan_object_reflow(slide)
+
+
+def _text_box_repairs(slide: dict[str, Any]) -> list[dict[str, Any]]:
+    size = slide.get("size") or {}
+    slide_width = int(size.get("width") or 12192000)
+    objects = [obj for obj in slide.get("object_boxes", []) if obj.get("bbox")]
+    repairs: list[dict[str, Any]] = []
+    for obj in objects:
+        if str(obj.get("type") or "") != "sp":
+            continue
+        text = _normalized_inline_text(obj.get("text") or "")
+        if not _is_fragile_inline_math(text):
+            continue
+        bbox = dict(obj.get("bbox") or {})
+        target_width = _protected_text_width(text, bbox, objects, slide_width)
+        repairs.append(
+            {
+                "id": str(obj.get("id") or ""),
+                "type": "single_line_math_text",
+                "text": text,
+                "wrap": "none",
+                "to": {
+                    "x": int(bbox["x"]),
+                    "y": int(bbox["y"]),
+                    "w": target_width,
+                    "h": int(bbox["h"]),
+                },
+            }
+        )
+    return repairs
+
+
+def _normalized_inline_text(text: str) -> str:
+    return " ".join(text.replace("\u3000", " ").split())
+
+
+def _is_fragile_inline_math(text: str) -> bool:
+    if not (3 <= len(text) <= 28):
+        return False
+    if any("\u4e00" <= char <= "\u9fff" for char in text):
+        return False
+    if not any(op in text for op in ("<", ">", "=", "≤", "≥")):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_ .,:;：()<>＝=≤≥+\-−*/\\α-ωΑ-Ω]+", text):
+        return False
+    comparison_count = sum(text.count(op) for op in ("<", ">", "=", "≤", "≥"))
+    if comparison_count >= 2:
+        return True
+    if comparison_count >= 1 and text.rstrip().endswith((".", ":", ";")):
+        return True
+    return bool(re.search(r"\s[<>=≤≥]\s", text))
+
+
+def _protected_text_width(
+    text: str,
+    bbox: dict[str, Any],
+    objects: list[dict[str, Any]],
+    slide_width: int,
+) -> int:
+    x = int(bbox["x"])
+    y = int(bbox["y"])
+    width = int(bbox["w"])
+    height = int(bbox["h"])
+    desired = max(width, int(len(text) * 170000))
+    right_limit = slide_width - max(80000, int(slide_width * 0.01))
+    for other in objects:
+        other_box = other.get("bbox") or {}
+        if other_box is bbox:
+            continue
+        other_x = int(other_box.get("x", 0))
+        if other_x <= x + width:
+            continue
+        if _vertical_overlap_ratio(bbox, other_box) < 0.25:
+            continue
+        right_limit = min(right_limit, other_x - 80000)
+    return max(width, min(desired, max(width, right_limit - x)))
+
+
+def _vertical_overlap_ratio(first: dict[str, Any], second: dict[str, Any]) -> float:
+    top = max(int(first.get("y", 0)), int(second.get("y", 0)))
+    bottom = min(
+        int(first.get("y", 0)) + int(first.get("h", 0)),
+        int(second.get("y", 0)) + int(second.get("h", 0)),
+    )
+    overlap = max(0, bottom - top)
+    smaller = min(int(first.get("h", 0)), int(second.get("h", 0)))
+    return overlap / smaller if smaller else 0.0
+
+
+def _page_compact(slide: dict[str, Any], object_reflow: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not object_reflow or (object_reflow.get("quality_gate") or {}).get("passed", True):
+        return None
+    size = slide.get("size") or {}
+    page_height = max(int(size.get("height") or 6858000), 1)
+    bottoms = [
+        int((obj.get("bbox") or {}).get("y", 0)) + int((obj.get("bbox") or {}).get("h", 0))
+        for obj in slide.get("object_boxes", [])
+        if obj.get("bbox")
+    ]
+    if not bottoms:
+        return None
+    bottom_ratio = max(bottoms) / page_height
+    if bottom_ratio < 0.93:
+        return None
+    scale = max(0.90, min(0.96, 0.90 / bottom_ratio))
+    return {
+        "type": "page_compact",
+        "scale": scale,
+        "reason": "重排质量门禁失败且内容贴近页底，轻微缩放保留原页面关系。",
+    }
 
 
 def _occlusion_flows(slide: dict[str, Any]) -> list[dict[str, Any]]:
@@ -166,26 +259,6 @@ def _occlusion_flows(slide: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return flows
-
-
-def _marker_role(index: int, total: int, step: dict[str, Any]) -> str:
-    if step.get("covers_prior_object"):
-        return "covered_content"
-    if index == 1:
-        return "first_change"
-    if index == total:
-        return "key_result"
-    return "next_change"
-
-
-def _marker_hint(role: str) -> str:
-    hints = {
-        "first_change": "先出现",
-        "next_change": "随后出现",
-        "key_result": "关键结果",
-        "covered_content": "遮挡变化",
-    }
-    return hints.get(role, "发生变化")
 
 
 def _guide_step_summaries(animation_steps: list[dict[str, Any]]) -> list[str]:

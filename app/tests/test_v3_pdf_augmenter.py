@@ -8,6 +8,7 @@ import zipfile
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
@@ -19,11 +20,13 @@ TMP_ROOT.mkdir(parents=True, exist_ok=True)
 SIMPLE_ANIMATED_SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "animation_guide_smoke.pptx"
 REVIEW_SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "Review+chapter24-27.pptx"
 TEST_SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "test.pptx"
+P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 from augment_planner import build_augment_plan
-from converter import convert_pptx
+from converter import _compact_render_box, convert_pptx
 from ooxml_slide_editor import parse_slide_shapes
-from pdf_augmenter import _overlay_graphic_frame_regions, _reflow_step_labels_xml, write_guide_deck
+from pdf_augmenter import _apply_page_compact_if_present, _overlay_graphic_frame_regions, _reflow_step_labels_xml, write_guide_deck
 from pptx_parser import parse_pptx
 from slide_analyzer import analyze_presentation
 from test_v2_pipeline import write_minimal_pptx
@@ -78,9 +81,7 @@ class V3PdfAugmenterTest(unittest.TestCase):
         self.assertEqual(slide_plan["page_budget"], 1)
         self.assertEqual(slide_plan["guide_pages"], [])
         self.assertEqual(plan["summary"]["guide_page_count"], 0)
-        self.assertEqual(len(slide_plan["inline_markers"]), 1)
-        self.assertEqual(slide_plan["inline_markers"][0]["role"], "first_change")
-        self.assertEqual(slide_plan["inline_markers"][0]["hint"], "先出现")
+        self.assertEqual(slide_plan["inline_markers"], [])
 
     def test_augment_plan_object_reflows_high_crowding_animation_without_extra_pages(self):
         with workspace_tmpdir() as tmp:
@@ -184,8 +185,7 @@ class V3PdfAugmenterTest(unittest.TestCase):
         plan = build_augment_plan(analysis)
         markers = plan["slides"][0]["inline_markers"]
 
-        self.assertEqual([marker["role"] for marker in markers], ["first_change", "key_result"])
-        self.assertEqual([marker["hint"] for marker in markers], ["先出现", "关键结果"])
+        self.assertEqual(markers, [])
 
     def test_augment_plan_places_hints_in_available_blank_zone(self):
         analysis = {
@@ -223,10 +223,7 @@ class V3PdfAugmenterTest(unittest.TestCase):
 
         markers = build_augment_plan(analysis)["slides"][0]["inline_markers"]
 
-        self.assertEqual(len(markers), 2)
-        self.assertEqual(markers[0]["placement"]["side"], "right")
-        self.assertGreaterEqual(markers[0]["hint_box"]["x"], 7600000)
-        self.assertGreater(markers[1]["hint_box"]["y"], markers[0]["hint_box"]["y"])
+        self.assertEqual(markers, [])
 
     def test_augment_plan_skips_inline_markers_without_blank_zone(self):
         analysis = {
@@ -259,24 +256,20 @@ class V3PdfAugmenterTest(unittest.TestCase):
 
         self.assertEqual(slide_plan["inline_markers"], [])
 
-    def test_write_guide_deck_embeds_inline_markers_on_source_slide(self):
+    def test_write_guide_deck_does_not_embed_inline_markers_by_default(self):
         with workspace_tmpdir() as tmp:
             guide_deck = tmp / "guide_deck.pptx"
             analysis = analyze_presentation(parse_pptx(SIMPLE_ANIMATED_SAMPLE))
             plan = build_augment_plan(analysis)
-            first_hint_box = plan["slides"][0]["inline_markers"][0]["hint_box"]
 
             write_guide_deck(SIMPLE_ANIMATED_SAMPLE, guide_deck, plan)
             source_slide_xml = _read_zip_text(guide_deck, "ppt/slides/slide1.xml")
 
-        self.assertIn("Guide Inline Marker 1", source_slide_xml)
-        self.assertIn("Guide Inline Hint 1", source_slide_xml)
-        self.assertIn('anchor="ctr"', source_slide_xml)
-        self.assertIn('algn="ctr"', source_slide_xml)
-        self.assertIn(f'<a:off x="{first_hint_box["x"]}" y="{first_hint_box["y"]}"/>', source_slide_xml)
-        self.assertIn("先出现", source_slide_xml)
+        self.assertNotIn("Guide Inline Marker", source_slide_xml)
+        self.assertNotIn("Guide Inline Hint", source_slide_xml)
+        self.assertNotIn("先出现", source_slide_xml)
+        self.assertNotIn("关键结果", source_slide_xml)
         self.assertNotIn("Guide Highlight", source_slide_xml)
-        self.assertLess(source_slide_xml.index("Guide Inline Marker 1"), source_slide_xml.index("</p:spTree>"))
 
     def test_write_guide_deck_does_not_draw_large_debug_frames_for_review_sample(self):
         with workspace_tmpdir() as tmp:
@@ -291,6 +284,22 @@ class V3PdfAugmenterTest(unittest.TestCase):
         self.assertLessEqual(parsed["slide_count"], 48)
         self.assertNotIn("Guide Highlight", slide_xml)
 
+    def test_write_guide_deck_protects_short_math_text_boxes_from_wrapping(self):
+        with workspace_tmpdir() as tmp:
+            guide_deck = tmp / "guide_deck.pptx"
+            analysis = analyze_presentation(parse_pptx(REVIEW_SAMPLE))
+            plan = build_augment_plan(analysis)
+
+            write_guide_deck(REVIEW_SAMPLE, guide_deck, plan)
+            slide_xml = _read_zip_text(guide_deck, "ppt/slides/slide23.xml")
+            math_box = _sp_shape_by_id(slide_xml, "566294")
+
+        self.assertIn(23, plan["summary"]["text_box_repair_pages"])
+        body_pr = math_box.find(f"{{{P_NS}}}txBody/{{{A_NS}}}bodyPr")
+        ext = math_box.find(f"{{{P_NS}}}spPr/{{{A_NS}}}xfrm/{{{A_NS}}}ext")
+        self.assertEqual(body_pr.attrib.get("wrap"), "none")
+        self.assertGreater(int(ext.attrib["cx"]), 1357630)
+
     def test_write_guide_deck_keeps_simple_animation_as_single_enhanced_slide(self):
         with workspace_tmpdir() as tmp:
             guide_deck = tmp / "guide_deck.pptx"
@@ -302,7 +311,8 @@ class V3PdfAugmenterTest(unittest.TestCase):
             source_slide_xml = _read_zip_text(guide_deck, "ppt/slides/slide1.xml")
 
         self.assertEqual(parsed["slide_count"], 1)
-        self.assertIn("Guide Inline Marker 1", source_slide_xml)
+        self.assertNotIn("Guide Inline Marker", source_slide_xml)
+        self.assertNotIn("Guide Inline Hint", source_slide_xml)
         self.assertNotIn("Guide Highlight", source_slide_xml)
 
     def test_write_guide_deck_keeps_object_reflow_inside_source_slide(self):
@@ -349,6 +359,35 @@ class V3PdfAugmenterTest(unittest.TestCase):
 
         self.assertLess(_overlap_ratio(shapes["Guide Reflow Step 1"]["bbox"], shapes["Formula"]["bbox"]), 0.01)
 
+    def test_write_guide_deck_does_not_add_reflow_step_labels_by_default(self):
+        with workspace_tmpdir() as tmp:
+            pptx_path = tmp / "course.pptx"
+            guide_deck = tmp / "guide_deck.pptx"
+            write_minimal_pptx(pptx_path)
+            plan = {
+                "slides": [
+                    {
+                        "source_slide": 1,
+                        "strategy": "object_reflow",
+                        "object_reflow": {
+                            "operations": [
+                                {
+                                    "op": "move_resize",
+                                    "id": "4",
+                                    "object_type": "graphicFrame",
+                                    "to": {"x": 3300000, "y": 2100000, "w": 1900000, "h": 720000},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+
+            write_guide_deck(pptx_path, guide_deck, plan)
+            source_slide_xml = _read_zip_text(guide_deck, "ppt/slides/slide1.xml")
+
+        self.assertNotIn("Guide Reflow Step", source_slide_xml)
+
     def test_pdf_overlay_uses_graphic_frame_preview_instead_of_dirty_page_crop(self):
         with workspace_tmpdir() as tmp:
             pptx_path = tmp / "formula_source.pptx"
@@ -394,6 +433,234 @@ class V3PdfAugmenterTest(unittest.TestCase):
             self.assertLess(green, 80)
             self.assertGreater(blue, 180)
 
+    def test_pdf_overlay_does_not_repaint_stable_graphic_frame_with_bad_preview(self):
+        with workspace_tmpdir() as tmp:
+            pptx_path = tmp / "formula_source.pptx"
+            base_pdf = tmp / "base.pdf"
+            guide_pdf = tmp / "guide.pdf"
+            _write_formula_preview_pptx(pptx_path, preview_image=_bad_preview_image())
+            _write_colored_pdf(base_pdf, {"x": 72, "y": 40.5, "w": 144, "h": 40.5}, (1, 0, 0))
+            _write_colored_pdf(guide_pdf, {"x": 120, "y": 55, "w": 48, "h": 12}, (1, 0, 0))
+            plan = {
+                "slides": [
+                    {
+                        "source_slide": 1,
+                        "size": {"width": 1000, "height": 1000},
+                        "strategy": "keep_native",
+                        "object_boxes": [
+                            {
+                                "id": "formula",
+                                "type": "graphicFrame",
+                                "bbox": {"x": 100, "y": 100, "w": 200, "h": 100},
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            _overlay_graphic_frame_regions(pptx_path, base_pdf, guide_pdf, plan)
+
+            red, green, blue = _sample_pdf_pixel(guide_pdf, 144, 61)
+            self.assertGreater(red, 180)
+            self.assertLess(green, 80)
+            self.assertLess(blue, 80)
+
+    def test_pdf_overlay_repairs_stable_graphic_frame_when_render_check_fails(self):
+        with workspace_tmpdir() as tmp:
+            pptx_path = tmp / "formula_source.pptx"
+            base_pdf = tmp / "base.pdf"
+            guide_pdf = tmp / "guide.pdf"
+            _write_formula_preview_pptx(pptx_path)
+            _write_colored_pdf(base_pdf, {"x": 72, "y": 40.5, "w": 144, "h": 40.5}, (1, 0, 0))
+            _write_bad_formula_pdf(guide_pdf)
+            plan = {
+                "slides": [
+                    {
+                        "source_slide": 1,
+                        "size": {"width": 1000, "height": 1000},
+                        "strategy": "keep_native",
+                        "object_boxes": [
+                            {
+                                "id": "formula",
+                                "type": "graphicFrame",
+                                "bbox": {"x": 100, "y": 100, "w": 200, "h": 100},
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            _overlay_graphic_frame_regions(pptx_path, base_pdf, guide_pdf, plan)
+
+            red, green, blue = _sample_pdf_pixel(guide_pdf, 144, 61)
+            self.assertLess(red, 80)
+            self.assertLess(green, 80)
+            self.assertGreater(blue, 180)
+
+    def test_pdf_overlay_repairs_stable_graphic_frame_with_usable_preview(self):
+        with workspace_tmpdir() as tmp:
+            pptx_path = tmp / "formula_source.pptx"
+            base_pdf = tmp / "base.pdf"
+            guide_pdf = tmp / "guide.pdf"
+            _write_formula_preview_pptx(pptx_path)
+            _write_colored_pdf(base_pdf, {"x": 72, "y": 40.5, "w": 144, "h": 40.5}, (1, 0, 0))
+            _write_colored_pdf(guide_pdf, {"x": 72, "y": 40.5, "w": 144, "h": 40.5}, (1, 1, 1))
+            plan = {
+                "slides": [
+                    {
+                        "source_slide": 1,
+                        "size": {"width": 1000, "height": 1000},
+                        "strategy": "keep_native",
+                        "object_boxes": [
+                            {
+                                "id": "formula",
+                                "type": "graphicFrame",
+                                "bbox": {"x": 100, "y": 100, "w": 200, "h": 100},
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            _overlay_graphic_frame_regions(pptx_path, base_pdf, guide_pdf, plan)
+
+            red, green, blue = _sample_pdf_pixel(guide_pdf, 144, 61)
+            self.assertLess(red, 80)
+            self.assertLess(green, 80)
+            self.assertGreater(blue, 180)
+
+    def test_pdf_overlay_skips_stable_graphic_frame_when_preview_also_fails(self):
+        with workspace_tmpdir() as tmp:
+            pptx_path = tmp / "formula_source.pptx"
+            base_pdf = tmp / "base.pdf"
+            guide_pdf = tmp / "guide.pdf"
+            _write_formula_preview_pptx(pptx_path, preview_image=_bad_preview_image())
+            _write_colored_pdf(base_pdf, {"x": 72, "y": 40.5, "w": 144, "h": 40.5}, (1, 0, 0))
+            _write_colored_pdf(guide_pdf, {"x": 72, "y": 40.5, "w": 144, "h": 40.5}, (1, 0, 0))
+            plan = {
+                "slides": [
+                    {
+                        "source_slide": 1,
+                        "size": {"width": 1000, "height": 1000},
+                        "strategy": "keep_native",
+                        "object_boxes": [
+                            {
+                                "id": "formula",
+                                "type": "graphicFrame",
+                                "bbox": {"x": 100, "y": 100, "w": 200, "h": 100},
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            _overlay_graphic_frame_regions(pptx_path, base_pdf, guide_pdf, plan)
+
+            red, green, blue = _sample_pdf_pixel(guide_pdf, 144, 61)
+            self.assertGreater(red, 180)
+            self.assertLess(green, 80)
+            self.assertLess(blue, 80)
+
+    def test_pdf_overlay_does_not_repaint_stable_grouped_graphic_frame(self):
+        with workspace_tmpdir() as tmp:
+            pptx_path = tmp / "formula_source.pptx"
+            base_pdf = tmp / "base.pdf"
+            guide_pdf = tmp / "guide.pdf"
+            _write_formula_preview_pptx(pptx_path)
+            _write_colored_pdf(base_pdf, {"x": 72, "y": 40.5, "w": 144, "h": 40.5}, (1, 0, 0))
+            _write_bad_formula_pdf(guide_pdf)
+            plan = {
+                "slides": [
+                    {
+                        "source_slide": 1,
+                        "size": {"width": 1000, "height": 1000},
+                        "strategy": "keep_native",
+                        "object_boxes": [
+                            {
+                                "id": "formula",
+                                "type": "graphicFrame",
+                                "bbox": {"x": 100, "y": 100, "w": 200, "h": 100},
+                                "in_group": True,
+                            }
+                        ],
+                    }
+                ]
+            }
+
+            _overlay_graphic_frame_regions(pptx_path, base_pdf, guide_pdf, plan)
+
+            red, green, blue = _sample_pdf_pixel(guide_pdf, 80, 60)
+            self.assertLess(red, 80)
+            self.assertLess(green, 80)
+            self.assertLess(blue, 80)
+
+    def test_pdf_overlay_does_not_paint_outside_formula_target_box(self):
+        with workspace_tmpdir() as tmp:
+            pptx_path = tmp / "formula_source.pptx"
+            base_pdf = tmp / "base.pdf"
+            guide_pdf = tmp / "guide.pdf"
+            _write_formula_preview_pptx(pptx_path)
+            _write_colored_pdf(base_pdf, {"x": 360, "y": 202.5, "w": 144, "h": 40.5}, (1, 0, 0))
+            _write_colored_pdf(guide_pdf, {"x": 354, "y": 202.5, "w": 6, "h": 40.5}, (0, 1, 0))
+            plan = {
+                "slides": [
+                    {
+                        "source_slide": 1,
+                        "size": {"width": 1000, "height": 1000},
+                        "strategy": "object_reflow",
+                        "object_reflow": {
+                            "operations": [
+                                {
+                                    "op": "move_resize",
+                                    "id": "formula",
+                                    "object_type": "graphicFrame",
+                                    "render_mode": "pdf_region_overlay",
+                                    "from": {"x": 100, "y": 100, "w": 200, "h": 100},
+                                    "to": {"x": 500, "y": 500, "w": 200, "h": 100},
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+
+            _overlay_graphic_frame_regions(pptx_path, base_pdf, guide_pdf, plan)
+
+            red, green, blue = _sample_pdf_pixel(guide_pdf, 357, 223)
+            self.assertLess(red, 80)
+            self.assertGreater(green, 180)
+            self.assertLess(blue, 80)
+
+    def test_page_compact_scales_content_away_from_bottom_edge(self):
+        with workspace_tmpdir() as tmp:
+            guide_pdf = tmp / "guide.pdf"
+            _write_colored_pdf(guide_pdf, {"x": 300, "y": 382, "w": 120, "h": 18}, (0, 0, 1))
+            plan = {
+                "slides": [
+                    {
+                        "source_slide": 1,
+                        "page_compact": {"type": "page_compact", "scale": 0.90},
+                    }
+                ]
+            }
+
+            _apply_page_compact_if_present(guide_pdf, plan)
+
+            red, green, blue = _sample_pdf_pixel(guide_pdf, 360, 392)
+            self.assertGreater(red, 240)
+            self.assertGreater(green, 240)
+            self.assertGreater(blue, 240)
+
+    def test_compact_render_box_matches_page_compact_transform(self):
+        box = {"x": 200, "y": 300, "w": 400, "h": 100}
+        compacted = _compact_render_box(
+            box,
+            {"width": 1000, "height": 800},
+            {"type": "page_compact", "scale": 0.90},
+        )
+
+        self.assertEqual(compacted, {"x": 230, "y": 310, "w": 360, "h": 90})
+
     def test_converter_outputs_guide_pdf_and_augment_plan(self):
         with workspace_tmpdir() as tmp:
             fake_soffice = tmp / "soffice.exe"
@@ -430,6 +697,15 @@ def _read_zip_text(path: Path, name: str) -> str:
         return package.read(name).decode("utf-8")
 
 
+def _sp_shape_by_id(slide_xml: str, shape_id: str):
+    root = ET.fromstring(slide_xml)
+    for shape in root.findall(f".//{{{P_NS}}}sp"):
+        c_nv_pr = shape.find(f"{{{P_NS}}}nvSpPr/{{{P_NS}}}cNvPr")
+        if c_nv_pr is not None and c_nv_pr.attrib.get("id") == shape_id:
+            return shape
+    raise AssertionError(f"shape {shape_id} not found")
+
+
 def _overlap_ratio(first: dict[str, int], second: dict[str, int]) -> float:
     left = max(first["x"], second["x"])
     top = max(first["y"], second["y"])
@@ -464,9 +740,20 @@ def _write_colored_pdf(path: Path, rect: dict[str, float], color: tuple[float, f
     doc.close()
 
 
-def _write_formula_preview_pptx(path: Path) -> None:
+def _write_bad_formula_pdf(path: Path) -> None:
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page(width=720, height=405)
+    page.draw_rect(fitz.Rect(72, 40.5, 216, 81), color=(1, 1, 0), fill=(1, 1, 0))
+    page.draw_rect(fitz.Rect(72, 48, 96, 74), color=(0, 0, 0), fill=(0, 0, 0))
+    doc.save(path)
+    doc.close()
+
+
+def _write_formula_preview_pptx(path: Path, preview_image=None) -> None:
     preview = BytesIO()
-    _preview_image().save(preview, format="PNG")
+    (preview_image or _preview_image()).save(preview, format="PNG")
     entries = {
         "[Content_Types].xml": """<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -512,6 +799,18 @@ def _preview_image():
     image = Image.new("RGB", (120, 60), "white")
     draw = ImageDraw.Draw(image)
     draw.rectangle((36, 18, 84, 42), fill="blue")
+    return image
+
+
+def _bad_preview_image():
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (120, 60), "white")
+    draw = ImageDraw.Draw(image)
+    for y in range(8, 54, 4):
+        draw.line((4, y, 116, y), fill="black", width=2)
+    for x in range(6, 114, 8):
+        draw.rectangle((x, 6, x + 4, 56), fill="black")
     return image
 
 

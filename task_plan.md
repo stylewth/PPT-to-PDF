@@ -85,6 +85,15 @@
 | 截图验收 | pending | 每次真实转换后对比 `base.pdf` 与 `guide.pdf`，截图不合格不算完成。 |
 | 执行计划 | complete | 详细路线见 `docs/superpowers/plans/2026-05-17-route-drift-repair.md`。 |
 
+## 2026-05-21 渲染门禁与公式根修计划
+| 阶段 | 状态 | 目标 |
+|---|---|---|
+| 1. 渲染门禁 | in_progress | 新增基于最新 `guide.pdf` 截图的视觉回归检查，截图失败即失败，不能只靠 bbox。 |
+| 2. 公式质量检测 | pending | 检测公式 fallback/渲染区域的墨迹触边、异常高密黑块、疑似裁切和叠字。 |
+| 3. 公式修复链路 | pending | fallback 可用则重绘公式；fallback 本身异常则暴露为视觉失败，不再假修复。 |
+| 4. 复杂页局部展开 | pending | 对第 35 页这类多对象冲突页做语义块展开，不继续单对象硬挪。 |
+| 5. 最新样例验收 | pending | 重启 8765，转换 `test.pptx` 和 `Review+chapter24-27.pptx`，渲染问题页截图审查。 |
+
 ## 关键约束
 | 约束 | 决策 |
 |---|---|
@@ -446,3 +455,32 @@
 | 追加导读页旧分支 | complete | 删除 `expand_after_native`、新幻灯片追加、整页重画 `reflow_page` 等旧代码；保留输出中的 `guide_pages: []` 和 `guide_page_count=0` 用于验收。 |
 | 暂不删除项 | pending | `demo/`、历史规划文档、`pdf_micro_reflow.py`、核心样例 PPTX 仍和比赛展示/历史路线/回归有关，未经确认不删。 |
 | 验收 | complete | 单测 81 项、后端编译、前端 JS 语法检查通过；已重启 8765 并真实转换 `app/samples/test.pptx`。 |
+
+## 2026-05-21 渲染门禁与公式修复执行结果
+| 阶段 | 状态 | 结果 |
+|---|---|---|
+| 渲染门禁 | complete | `report.json` 写入 `render_visual_check`，并输出重点页截图目录。 |
+| 公式修复链路 | complete | 移动公式按 fallback 预览等比绘制；稳定公式只在最终渲染检测失败时修复。 |
+| 错误重排拦截 | complete | 对象重排新增质量门禁，重排不能降低真实重叠时不落地。 |
+| 空间不足缩放 | complete | 重排失败且页底拥挤时采用整页轻微缩放，保留原页面关系。 |
+| 最新验收 | complete | `test.pptx` 与 `Review+chapter24-27.pptx` 最新转换的渲染门禁均通过。 |
+| 后续 | pending | 继续扩大真实课件样本，针对仍可能存在的非黄色公式、组合图形和 SmartArt 做视觉门禁补充。 |
+
+## 2026-05-21 追加收口
+| 阶段 | 状态 | 结果 |
+|---|---|---|
+| 组合公式解析 | complete | 组合内 `graphicFrame` 可解析、可移动，Review 第 4 页公式与相关图形不再互挡。 |
+| 行内公式保护 | complete | Review 第 22 页带制表占位的公式保持原位，不再被重排拆散。 |
+| fallback 可用性 | complete | 稳定公式只在预览图可用时覆盖，Review 第 28 页恢复正常公式显示。 |
+| 渲染门禁校准 | complete | 公式拥挤检测保留真实叠压识别，同时放过正常分式横线。 |
+| 最新验收 | complete | `test=027b583b047646b68e882e9483b85593`，`review=589f1b6da5984629907ea69494666f61`，两者 `render_visual_check.passed=true`。 |
+
+## 2026-05-22 残留排版问题收口
+| 阶段 | 状态 | 结果 |
+|---|---|---|
+| 第 36 页电阻错乱定位 | complete | 根因是对象级重排拆散电路图小图元，不是公式或 PDF 渲染问题。 |
+| 图元碎片化门禁 | complete | 大量小图元移动且缺少长文本锚点时拒绝落地，Review 第 36 页不再对象重排。 |
+| 第 23 页短条件拆行定位 | complete | 根因是短数学条件文本框被 LibreOffice 自动换行。 |
+| 单行数学文本保护 | complete | 对短比较式文本设置不换行，并在安全空隙内扩宽文本框。 |
+| 回归测试 | complete | 新增 Review 第 36 页电路图不重排、Review 第 23 页短数学文本不换行、稳定公式可用预览修复测试。 |
+| 最新验收 | complete | `test=a03c2c3d9d8149809e936ea33b80c898`，`review=5ee2eb6737df49ae993921331840564d`；完整 `render_visual_check.passed=true`，已查看第 23/36 页截图。 |

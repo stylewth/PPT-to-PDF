@@ -12,7 +12,7 @@ from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
 from native_converter import convert_pptx_to_pdf
-from ooxml_slide_editor import apply_shape_operations, label_shape_xml, parse_slide_shapes
+from ooxml_slide_editor import apply_shape_operations, apply_text_box_repairs, label_shape_xml, parse_slide_shapes
 from pdf_micro_reflow import apply_micro_reflow_pdf
 
 
@@ -43,6 +43,7 @@ def generate_guide_pdf(
             raise ValueError("PDF micro-reflow requires base_pdf_path.")
         apply_micro_reflow_pdf(base_pdf_path, guide_pdf_path, plan)
         _overlay_media_if_present(guide_pdf_path, media_manifest)
+        _apply_page_compact_if_present(guide_pdf_path, plan)
         return {"augment_plan_path": plan_path, "guide_pdf_path": guide_pdf_path}
 
     if not _has_augments(plan):
@@ -64,6 +65,7 @@ def generate_guide_pdf(
     if base_pdf_path is not None:
         _overlay_graphic_frame_regions(pptx_path, base_pdf_path, guide_pdf_path, plan)
     _overlay_media_if_present(guide_pdf_path, media_manifest)
+    _apply_page_compact_if_present(guide_pdf_path, plan)
     return {
         "augment_plan_path": plan_path,
         "guide_deck_path": guide_deck_path,
@@ -93,6 +95,8 @@ def _has_augments(plan: dict[str, Any]) -> bool:
         slide.get("inline_markers")
         or slide.get("micro_reflow")
         or slide.get("object_reflow")
+        or slide.get("page_compact")
+        or slide.get("text_box_repairs")
         for slide in plan.get("slides", [])
     )
 
@@ -108,6 +112,47 @@ def _has_object_reflow(plan: dict[str, Any]) -> bool:
 def _overlay_media_if_present(guide_pdf_path: str | Path, media_manifest: dict[str, Any] | None) -> None:
     if media_manifest:
         overlay_media_summaries(guide_pdf_path, media_manifest)
+
+
+def _apply_page_compact_if_present(guide_pdf_path: str | Path, plan: dict[str, Any]) -> None:
+    compact_by_page = {
+        int(slide.get("source_slide") or 0): slide.get("page_compact")
+        for slide in plan.get("slides", [])
+        if slide.get("page_compact")
+    }
+    if not compact_by_page:
+        return
+
+    import fitz
+
+    guide_path = Path(guide_pdf_path)
+    temp_path = guide_path.with_name(f"{guide_path.stem}.compact.tmp{guide_path.suffix}")
+    source = fitz.open(guide_path)
+    target = fitz.open()
+    try:
+        for page_index, source_page in enumerate(source):
+            compact = compact_by_page.get(page_index + 1)
+            page_rect = source_page.rect
+            output_page = target.new_page(width=page_rect.width, height=page_rect.height)
+            if not compact:
+                output_page.show_pdf_page(page_rect, source, page_index)
+                continue
+            scale = max(0.88, min(0.98, float(compact.get("scale") or 0.94)))
+            target_width = page_rect.width * scale
+            target_height = page_rect.height * scale
+            target_rect = fitz.Rect(
+                page_rect.x0 + (page_rect.width - target_width) / 2,
+                page_rect.y0 + (page_rect.height - target_height) / 2,
+                page_rect.x0 + (page_rect.width + target_width) / 2,
+                page_rect.y0 + (page_rect.height + target_height) / 2,
+            )
+            output_page.draw_rect(page_rect, color=None, fill=(1, 1, 1), width=0)
+            output_page.show_pdf_page(target_rect, source, page_index)
+        target.save(temp_path)
+    finally:
+        target.close()
+        source.close()
+    temp_path.replace(guide_path)
 
 
 def overlay_media_summaries(guide_pdf_path: str | Path, media_manifest: dict[str, Any]) -> None:
@@ -811,23 +856,28 @@ def _overlay_graphic_frame_regions(
     guide_pdf_path: str | Path,
     plan: dict[str, Any],
 ) -> None:
-    operations = list(_graphic_frame_overlay_operations(plan))
-    if not operations:
-        return
-
     import fitz
 
     source_pptx = Path(source_pptx_path)
-    base_path = Path(base_pdf_path)
     guide_path = Path(guide_pdf_path)
     temp_path = guide_path.with_name(f"{guide_path.stem}.overlay.tmp{guide_path.suffix}")
     previews: dict[tuple[int, str], dict[str, Any]] = {}
+    moved_operations = list(_graphic_frame_overlay_operations(plan))
+    moved_keys = {
+        (slide_index + 1, str(operation.get("id") or ""))
+        for slide_index, _slide_plan, operation in moved_operations
+    }
 
-    base_doc = fitz.open(base_path)
     guide_doc = fitz.open(guide_path)
     try:
+        operations = [
+            *moved_operations,
+            *_stable_graphic_frame_overlay_operations(fitz, guide_doc, plan, moved_keys),
+        ]
+        if not operations:
+            return
         for slide_index, slide_plan, operation in operations:
-            if slide_index < 0 or slide_index >= len(base_doc) or slide_index >= len(guide_doc):
+            if slide_index < 0 or slide_index >= len(guide_doc):
                 continue
             source_box = operation.get("from") or {}
             target_box = operation.get("to") or {}
@@ -835,34 +885,27 @@ def _overlay_graphic_frame_regions(
                 continue
 
             page_size = _slide_page_size(slide_plan)
-            source_page = base_doc[slide_index]
             target_page = guide_doc[slide_index]
-            source_rect = _pdf_rect_from_slide_box(source_box, page_size, source_page.rect)
-            target_rect = _pdf_rect_from_slide_box(target_box, page_size, target_page.rect)
-            source_rect = source_rect & source_page.rect
+            target_rect = _pdf_rect_from_slide_box(target_box, page_size, target_page.rect, pad=False)
             target_rect = target_rect & target_page.rect
-            if source_rect.is_empty or target_rect.is_empty:
+            if target_rect.is_empty:
                 continue
             object_id = str(operation.get("id") or "")
             preview_key = (slide_index + 1, object_id)
             if preview_key not in previews:
                 previews[preview_key] = _graphic_frame_preview(source_pptx, slide_index + 1, object_id) or {}
-            if previews[preview_key]:
-                _draw_graphic_frame_preview(target_page, target_rect, previews[preview_key])
-            else:
-                target_page.show_pdf_page(target_rect, base_doc, slide_index, clip=source_rect, overlay=True)
+            preview = previews[preview_key]
+            if preview and (not operation.get("stable") or _graphic_frame_preview_is_usable(preview)):
+                _draw_graphic_frame_preview(target_page, target_rect, preview)
 
         guide_doc.save(temp_path)
     finally:
-        base_doc.close()
         guide_doc.close()
     temp_path.replace(guide_path)
 
 
 def _graphic_frame_overlay_operations(plan: dict[str, Any]):
     for slide_plan in plan.get("slides", []):
-        if slide_plan.get("strategy") != "object_reflow":
-            continue
         slide_index = int(slide_plan.get("source_slide") or 0) - 1
         operations = (slide_plan.get("object_reflow") or {}).get("operations") or []
         for operation in operations:
@@ -871,6 +914,86 @@ def _graphic_frame_overlay_operations(plan: dict[str, Any]):
             if str(operation.get("object_type") or "") != "graphicFrame":
                 continue
             yield slide_index, slide_plan, operation
+
+
+def _stable_graphic_frame_overlay_operations(fitz: Any, guide_doc: Any, plan: dict[str, Any], moved_keys: set[tuple[int, str]]):
+    for slide_plan in plan.get("slides", []):
+        slide_number = int(slide_plan.get("source_slide") or 0)
+        slide_index = slide_number - 1
+        if slide_index < 0 or slide_index >= len(guide_doc):
+            continue
+        page = guide_doc[slide_index]
+        page_size = _slide_page_size(slide_plan)
+        for obj in slide_plan.get("object_boxes", []):
+            object_id = str(obj.get("id") or "")
+            if not object_id or (slide_number, object_id) in moved_keys:
+                continue
+            if str(obj.get("type") or "") != "graphicFrame":
+                continue
+            if bool(obj.get("in_group")):
+                continue
+            bbox = obj.get("bbox") or {}
+            if not _valid_box(bbox):
+                continue
+            target_rect = _pdf_rect_from_slide_box(bbox, page_size, page.rect, pad=False) & page.rect
+            if target_rect.is_empty:
+                continue
+            yield slide_index, slide_plan, {
+                "id": object_id,
+                "object_type": "graphicFrame",
+                "from": bbox,
+                "to": bbox,
+                "stable": True,
+                "repair_required": _graphic_frame_render_needs_repair(fitz, page, target_rect),
+            }
+
+
+def _graphic_frame_render_needs_repair(fitz: Any, page: Any, target_rect: Any) -> bool:
+    from PIL import Image
+    from render_visual_check import check_rendered_image
+
+    pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), clip=target_rect, alpha=False)
+    image = Image.open(BytesIO(pix.tobytes("png"))).convert("RGB")
+    result = check_rendered_image(
+        image,
+        formula_regions=[{"x0": 0, "y0": 0, "x1": image.width, "y1": image.height}],
+    )
+    return not result["passed"]
+
+
+def _graphic_frame_preview_is_usable(preview: dict[str, Any]) -> bool:
+    from PIL import Image
+    from render_visual_check import check_rendered_image
+
+    image = Image.open(BytesIO(preview["bytes"])).convert("RGB")
+    result = check_rendered_image(
+        image,
+        formula_regions=[{"x0": 0, "y0": 0, "x1": image.width, "y1": image.height}],
+    )
+    if result["passed"]:
+        return True
+    return not _preview_has_dense_dark_ink(image)
+
+
+def _preview_has_dense_dark_ink(image: Any) -> bool:
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return False
+    dark = 0
+    ink = 0
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            red, green, blue = pixels[x, y]
+            if red < 80 and green < 80 and blue < 80:
+                dark += 1
+                ink += 1
+            elif blue > 120 and red < 120 and green < 160:
+                ink += 1
+            elif red > 140 and green < 90 and blue < 90:
+                ink += 1
+    area = width * height
+    return dark / area > 0.12 or (dark / area > 0.08 and ink / area > 0.22)
 
 
 def _graphic_frame_preview(
@@ -1003,27 +1126,9 @@ def _trim_transparent(image: Any) -> Any:
 
 
 def _draw_graphic_frame_preview(page: Any, target_rect: Any, preview: dict[str, Any]) -> None:
-    fill = preview.get("fill")
-    if fill is not None:
-        page.draw_rect(target_rect, color=fill, fill=fill, overlay=True)
-    image_rect = _inset_rect(target_rect, 0.06, 0.08)
-    page.insert_image(image_rect, stream=preview["bytes"], keep_proportion=False, overlay=True)
-
-
-def _inset_rect(target_rect: Any, pad_x_ratio: float, pad_y_ratio: float) -> Any:
-    import fitz
-
-    pad_x = target_rect.width * pad_x_ratio
-    pad_y = target_rect.height * pad_y_ratio
-    result = fitz.Rect(
-        target_rect.x0 + pad_x,
-        target_rect.y0 + pad_y,
-        target_rect.x1 - pad_x,
-        target_rect.y1 - pad_y,
-    )
-    if result.width <= 0 or result.height <= 0:
-        return target_rect
-    return result
+    fill = preview.get("fill") or (1, 1, 1)
+    page.draw_rect(target_rect, color=fill, fill=fill, overlay=True)
+    page.insert_image(target_rect, stream=preview["bytes"], keep_proportion=True, overlay=True)
 
 
 def _slide_page_size(slide_plan: dict[str, Any]) -> dict[str, int]:
@@ -1038,12 +1143,23 @@ def _valid_box(box: dict[str, Any]) -> bool:
     return all(key in box for key in ("x", "y", "w", "h")) and int(box["w"]) > 0 and int(box["h"]) > 0
 
 
-def _pdf_rect_from_slide_box(box: dict[str, Any], slide_size: dict[str, int], page_rect: Any) -> Any:
+def _pdf_rect_from_slide_box(
+    box: dict[str, Any],
+    slide_size: dict[str, int],
+    page_rect: Any,
+    *,
+    pad: bool = True,
+) -> Any:
     import fitz
 
     slide_width = max(1, int(slide_size["width"]))
     slide_height = max(1, int(slide_size["height"]))
-    padded = _padded_overlay_box(box, slide_width, slide_height)
+    padded = _padded_overlay_box(box, slide_width, slide_height) if pad else {
+        "x": int(box["x"]),
+        "y": int(box["y"]),
+        "w": int(box["w"]),
+        "h": int(box["h"]),
+    }
     x0 = page_rect.x0 + padded["x"] / slide_width * page_rect.width
     y0 = page_rect.y0 + padded["y"] / slide_height * page_rect.height
     x1 = page_rect.x0 + (padded["x"] + padded["w"]) / slide_width * page_rect.width
@@ -1071,27 +1187,26 @@ def _enhance_source_slides(
     plan: dict[str, Any],
 ) -> None:
     for slide_plan in plan.get("slides", []):
+        slide_path = _source_slide_path(slide_paths, slide_plan.get("source_slide", 0))
+        if slide_path is None or slide_path not in entries:
+            continue
+        repairs = slide_plan.get("text_box_repairs") or []
+        if repairs:
+            slide_xml = entries[slide_path].decode("utf-8")
+            entries[slide_path] = apply_text_box_repairs(slide_xml, repairs).encode("utf-8")
         if slide_plan.get("strategy") == "object_reflow":
-            slide_path = _source_slide_path(slide_paths, slide_plan.get("source_slide", 0))
-            if slide_path is not None and slide_path in entries:
-                slide_xml = entries[slide_path].decode("utf-8")
-                operations = (slide_plan.get("object_reflow") or {}).get("operations") or []
-                slide_xml = apply_shape_operations(slide_xml, operations)
-                relation_xml = _reflow_relation_lines_xml(slide_xml, operations)
-                if relation_xml:
-                    slide_xml = _insert_before_close(slide_xml, "spTree", relation_xml)
-                label_xml = _reflow_step_labels_xml(slide_xml, operations)
-                if label_xml:
-                    slide_xml = _insert_before_close(slide_xml, "spTree", label_xml)
-                entries[slide_path] = slide_xml.encode("utf-8")
+            slide_xml = entries[slide_path].decode("utf-8")
+            operations = (slide_plan.get("object_reflow") or {}).get("operations") or []
+            slide_xml = apply_shape_operations(slide_xml, operations)
+            relation_xml = _reflow_relation_lines_xml(slide_xml, operations)
+            if relation_xml:
+                slide_xml = _insert_before_close(slide_xml, "spTree", relation_xml)
+            entries[slide_path] = slide_xml.encode("utf-8")
             continue
         if slide_plan.get("strategy") == "pdf_micro_reflow":
             continue
         markers = slide_plan.get("inline_markers") or []
         if not markers:
-            continue
-        slide_path = _source_slide_path(slide_paths, slide_plan.get("source_slide", 0))
-        if slide_path is None or slide_path not in entries:
             continue
         slide_xml = entries[slide_path].decode("utf-8")
         marker_xml = _inline_marker_shapes_xml(slide_xml, markers, slide_plan.get("size", {}))

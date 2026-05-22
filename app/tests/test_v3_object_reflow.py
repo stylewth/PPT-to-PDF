@@ -80,6 +80,27 @@ class V3ObjectReflowTest(unittest.TestCase):
         self.assertIn("<p:xfrm>", updated)
         self.assertNotIn("</p:xfrm><p:spPr>", updated)
 
+    def test_ooxml_editor_parses_and_moves_grouped_graphic_frame(self):
+        updated = apply_shape_operations(
+            GROUPED_GRAPHIC_FRAME_SLIDE_XML,
+            [
+                {
+                    "op": "move_resize",
+                    "id": "9",
+                    "to": {"x": 6400000, "y": 2600000, "w": 2100000, "h": 720000},
+                    "reason": "移动组内公式",
+                }
+            ],
+        )
+
+        shapes = {shape["id"]: shape for shape in parse_slide_shapes(updated)}
+
+        self.assertIn("9", shapes)
+        self.assertEqual(
+            shapes["9"]["bbox"],
+            {"x": 6400000, "y": 2600000, "w": 2100000, "h": 720000},
+        )
+
     def test_overlap_graph_identifies_animation_occlusion_edges(self):
         graph = build_overlap_graph(
             {
@@ -451,6 +472,112 @@ class V3ObjectReflowTest(unittest.TestCase):
 
         self.assertLess(_overlap_ratio(after["diagram"], after["formula"]), 0.12)
 
+    def test_review_sample_moved_formula_or_picture_boxes_do_not_collide(self):
+        sample = Path(__file__).resolve().parents[1] / "samples" / "Review+chapter24-27.pptx"
+        analysis = analyze_presentation(parse_pptx(sample))
+
+        for slide in analysis["slides"]:
+            plan = plan_object_reflow(slide)
+            operations = plan["operations"]
+            if not operations:
+                continue
+            after = {item["id"]: item["bbox"] for item in simulate_operations(slide["object_boxes"], operations)}
+            before = {
+                str(item.get("id") or ""): item["bbox"]
+                for item in slide["object_boxes"]
+                if item.get("bbox")
+            }
+            moved_ids = {str(operation.get("id") or "") for operation in operations}
+            object_types = {str(item.get("id") or ""): str(item.get("type") or "") for item in slide["object_boxes"]}
+            ids = list(after)
+            for index, first_id in enumerate(ids):
+                for second_id in ids[index + 1 :]:
+                    pair_types = {object_types.get(first_id), object_types.get(second_id)}
+                    if pair_types != {"graphicFrame", "pic"}:
+                        continue
+                    ratio = _overlap_ratio(after[first_id], after[second_id])
+                    if first_id in moved_ids or second_id in moved_ids:
+                        self.assertLess(
+                            ratio,
+                            0.02,
+                            f"slide {slide['number']} moved visual pair {first_id}/{second_id} overlaps",
+                        )
+                    else:
+                        self.assertLessEqual(
+                            ratio,
+                            _overlap_ratio(before[first_id], before[second_id]) + 0.001,
+                            f"slide {slide['number']} stable visual pair {first_id}/{second_id} got worse",
+                        )
+
+    def test_moved_picture_avoids_moved_formula_final_position(self):
+        slide = {
+            "number": 1,
+            "size": {"width": 12192000, "height": 6858000},
+            "crowding": "high",
+            "complexity": "complex",
+            "object_boxes": [
+                {"id": "body", "text": "Question text", "bbox": {"x": 1000000, "y": 1000000, "w": 3600000, "h": 800000}},
+                {"id": "cover", "text": "Animated cover", "bbox": {"x": 1100000, "y": 1100000, "w": 3300000, "h": 760000}},
+                {"id": "formula", "type": "graphicFrame", "text": "", "bbox": {"x": 4200000, "y": 2050000, "w": 2400000, "h": 700000}},
+                {"id": "diagram", "type": "pic", "text": "", "bbox": {"x": 4400000, "y": 2100000, "w": 2100000, "h": 1100000}},
+            ],
+            "text_objects": [
+                {"id": "body", "text": "Question text", "bbox": {"x": 1000000, "y": 1000000, "w": 3600000, "h": 800000}},
+                {"id": "cover", "text": "Animated cover", "bbox": {"x": 1100000, "y": 1100000, "w": 3300000, "h": 760000}},
+            ],
+            "animation_steps": [
+                {
+                    "target_id": "cover",
+                    "target_text": "Animated cover",
+                    "bbox": {"x": 1100000, "y": 1100000, "w": 3300000, "h": 760000},
+                    "covered_objects": [
+                        {"id": "body", "text": "Question text", "bbox": {"x": 1000000, "y": 1000000, "w": 3600000, "h": 800000}},
+                    ],
+                }
+            ],
+        }
+
+        plan = plan_object_reflow(slide)
+        after = {item["id"]: item["bbox"] for item in simulate_operations(slide["object_boxes"], plan["operations"])}
+
+        self.assertIn("formula", {operation["id"] for operation in plan["operations"]})
+        self.assertIn("diagram", {operation["id"] for operation in plan["operations"]})
+        self.assertLess(_overlap_ratio(after["formula"], after["diagram"]), 0.02)
+
+    def test_graphic_frame_operations_do_not_enlarge_or_become_tiny(self):
+        sample = Path(__file__).resolve().parents[1] / "samples" / "Review+chapter24-27.pptx"
+        analysis = analyze_presentation(parse_pptx(sample))
+
+        for slide in analysis["slides"]:
+            plan = plan_object_reflow(slide)
+            for operation in plan["operations"]:
+                if operation.get("object_type") != "graphicFrame":
+                    continue
+                width_scale = operation["to"]["w"] / operation["from"]["w"]
+                height_scale = operation["to"]["h"] / operation["from"]["h"]
+                self.assertLessEqual(width_scale, 1.001)
+                self.assertLessEqual(height_scale, 1.001)
+                self.assertGreaterEqual(width_scale, 0.60)
+                self.assertGreaterEqual(height_scale, 0.60)
+
+    def test_review_slide_35_abandons_reflow_when_quality_gate_fails(self):
+        sample = Path(__file__).resolve().parents[1] / "samples" / "Review+chapter24-27.pptx"
+        slide = analyze_presentation(parse_pptx(sample))["slides"][34]
+
+        plan = plan_object_reflow(slide)
+
+        self.assertFalse(plan["quality_gate"]["passed"])
+        self.assertEqual(plan["operations"], [])
+
+    def test_review_slide_36_does_not_reflow_circuit_diagram_primitives(self):
+        sample = Path(__file__).resolve().parents[1] / "samples" / "Review+chapter24-27.pptx"
+        slide = analyze_presentation(parse_pptx(sample))["slides"][35]
+
+        plan = plan_object_reflow(slide)
+
+        self.assertFalse(plan["quality_gate"]["passed"])
+        self.assertEqual(plan["operations"], [])
+
     def test_write_guide_deck_applies_object_reflow_operations_to_source_slide(self):
         with workspace_tmpdir() as tmp:
             pptx_path = tmp / "course.pptx"
@@ -486,7 +613,7 @@ class V3ObjectReflowTest(unittest.TestCase):
             moved["bbox"],
             {"x": 3300000, "y": 2100000, "w": 1900000, "h": 720000},
         )
-        self.assertIn("Guide Reflow Step 1", source_slide_xml)
+        self.assertNotIn("Guide Reflow Step", source_slide_xml)
 
     def test_write_guide_deck_draws_relation_line_for_grouped_reflow_operation(self):
         with workspace_tmpdir() as tmp:
@@ -587,6 +714,29 @@ class V3ObjectReflowTest(unittest.TestCase):
 
         self.assertGreater(after["4"]["x"], before["21"]["x"] - 800000)
         self.assertLess(abs(after["4"]["y"] - before["4"]["y"]), 1200000)
+
+    def test_review_page4_grouped_formulas_do_not_push_charge_diagram_left(self):
+        sample = Path(__file__).resolve().parents[1] / "samples" / "Review+chapter24-27.pptx"
+        slide = analyze_presentation(parse_pptx(sample))["slides"][3]
+        plan = plan_object_reflow(slide)
+        after = {item["id"]: item["bbox"] for item in simulate_operations(slide["object_boxes"], plan["operations"])}
+        before = {str(item["id"]): item["bbox"] for item in slide["object_boxes"]}
+
+        self.assertGreater(after["4"]["x"], before["4"]["x"] - 1500000)
+
+    def test_review_page22_keeps_inline_formula_placeholders_in_text_rows(self):
+        sample = Path(__file__).resolve().parents[1] / "samples" / "Review+chapter24-27.pptx"
+        slide = analyze_presentation(parse_pptx(sample))["slides"][21]
+        plan = plan_object_reflow(slide)
+
+        moved_ids = {str(operation.get("id") or "") for operation in plan["operations"]}
+
+        self.assertNotIn("11", moved_ids)
+        self.assertNotIn("14", moved_ids)
+        self.assertNotIn("19", moved_ids)
+        self.assertNotIn("23", moved_ids)
+        self.assertNotIn("2", moved_ids)
+        self.assertNotIn("16", moved_ids)
 
     def test_test_sample_preserves_visual_group_proximity(self):
         sample = Path(__file__).resolve().parents[1] / "samples" / "test.pptx"
@@ -744,6 +894,36 @@ GRAPHIC_FRAME_SLIDE_XML = """<?xml version="1.0" encoding="UTF-8"?>
           </p:pic>
         </p:oleObj></a:graphicData></a:graphic>
       </p:graphicFrame>
+    </p:spTree>
+  </p:cSld>
+</p:sld>
+"""
+
+GROUPED_GRAPHIC_FRAME_SLIDE_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:nvGrpSpPr><p:cNvPr id="1" name=""/></p:nvGrpSpPr>
+      <p:grpSpPr/>
+      <p:grpSp>
+        <p:nvGrpSpPr><p:cNvPr id="8" name="Formula group"/></p:nvGrpSpPr>
+        <p:grpSpPr>
+          <a:xfrm>
+            <a:off x="3000000" y="1600000"/><a:ext cx="4200000" cy="1900000"/>
+            <a:chOff x="3000000" y="1600000"/><a:chExt cx="4200000" cy="1900000"/>
+          </a:xfrm>
+        </p:grpSpPr>
+        <p:graphicFrame>
+          <p:nvGraphicFramePr><p:cNvPr id="9" name="Grouped Formula"/></p:nvGraphicFramePr>
+          <p:xfrm><a:off x="5200000" y="2100000"/><a:ext cx="1800000" cy="650000"/></p:xfrm>
+          <a:graphic><a:graphicData><p:oleObj>
+            <p:pic>
+              <p:nvPicPr><p:cNvPr id="90" name="Formula fallback"/></p:nvPicPr>
+              <p:spPr><a:xfrm><a:off x="5200000" y="2100000"/><a:ext cx="1800000" cy="650000"/></a:xfrm></p:spPr>
+            </p:pic>
+          </p:oleObj></a:graphicData></a:graphic>
+        </p:graphicFrame>
+      </p:grpSp>
     </p:spTree>
   </p:cSld>
 </p:sld>

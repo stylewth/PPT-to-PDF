@@ -14,6 +14,7 @@ from native_converter import convert_pptx_to_pdf
 from object_reflow_planner import simulate_operations
 from pdf_augmenter import generate_guide_pdf
 from pptx_parser import parse_pptx
+from render_visual_check import check_rendered_pdf
 from reflow_visual_check import check_reflow_intent
 from slide_analyzer import analyze_presentation, summarize_analysis
 from study_builder import build_study_document
@@ -89,6 +90,7 @@ def convert_pptx(
     )
     write_metrics(metrics_path, metrics)
     reflow_intent_check = _build_reflow_intent_check(plan)
+    render_visual_check = _build_render_visual_check(guide_pdf_path, output, plan)
 
     report = {
         "kind": "conversion_report",
@@ -108,6 +110,7 @@ def convert_pptx(
         "summary": summarize_analysis(analysis),
         "media": media_manifest,
         "reflow_intent_check": reflow_intent_check,
+        "render_visual_check": render_visual_check,
         "warnings": warnings,
     }
     report_path.write_text(
@@ -162,4 +165,79 @@ def _build_reflow_intent_check(plan: dict[str, Any]) -> dict[str, Any]:
         "passed": not warnings,
         "warnings": warnings,
         "slides": slide_checks,
+    }
+
+
+def _build_render_visual_check(guide_pdf_path: str | Path | None, output: Path, plan: dict[str, Any]) -> dict[str, Any] | None:
+    if not guide_pdf_path:
+        return None
+    return check_rendered_pdf(
+        guide_pdf_path,
+        pages=_render_check_pages(plan),
+        formula_regions=_render_formula_regions(plan),
+        screenshot_dir=output / "render_visual_check",
+        scale=1.2,
+    )
+
+
+def _render_check_pages(plan: dict[str, Any]) -> list[int]:
+    pages: set[int] = set()
+    for slide in plan.get("slides", []):
+        slide_number = int(slide.get("source_slide") or 0)
+        if slide_number <= 0:
+            continue
+        if (slide.get("object_reflow") or {}).get("operations"):
+            pages.add(slide_number)
+            continue
+        if any(str(obj.get("type") or "") == "graphicFrame" for obj in slide.get("object_boxes", [])):
+            pages.add(slide_number)
+    return sorted(pages)
+
+
+def _render_formula_regions(plan: dict[str, Any]) -> dict[int, list[dict[str, Any]]]:
+    regions: dict[int, list[dict[str, Any]]] = {}
+    for slide in plan.get("slides", []):
+        slide_number = int(slide.get("source_slide") or 0)
+        if slide_number <= 0:
+            continue
+        size = slide.get("size") or {}
+        target_by_id = {
+            str(operation.get("id") or ""): operation.get("to") or {}
+            for operation in ((slide.get("object_reflow") or {}).get("operations") or [])
+            if str(operation.get("object_type") or "") == "graphicFrame"
+        }
+        for obj in slide.get("object_boxes", []):
+            if str(obj.get("type") or "") != "graphicFrame":
+                continue
+            bbox = dict(target_by_id.get(str(obj.get("id") or "")) or obj.get("bbox") or {})
+            if not all(key in bbox for key in ("x", "y", "w", "h")):
+                continue
+            bbox = _compact_render_box(bbox, size, slide.get("page_compact"))
+            regions.setdefault(slide_number, []).append(
+                {
+                    "id": str(obj.get("id") or ""),
+                    "bbox": bbox,
+                    "slide_size": size,
+                }
+            )
+    return regions
+
+
+def _compact_render_box(
+    bbox: dict[str, Any],
+    slide_size: dict[str, Any],
+    page_compact: dict[str, Any] | None,
+) -> dict[str, int]:
+    if not page_compact:
+        return {key: int(bbox[key]) for key in ("x", "y", "w", "h")}
+    scale = max(0.88, min(0.98, float(page_compact.get("scale") or 0.94)))
+    width = max(int(slide_size.get("width") or 12192000), 1)
+    height = max(int(slide_size.get("height") or 6858000), 1)
+    dx = (width - width * scale) / 2
+    dy = (height - height * scale) / 2
+    return {
+        "x": int(dx + int(bbox["x"]) * scale),
+        "y": int(dy + int(bbox["y"]) * scale),
+        "w": int(int(bbox["w"]) * scale),
+        "h": int(int(bbox["h"]) * scale),
     }
