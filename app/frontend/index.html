@@ -39,6 +39,28 @@
             <h2>问题报告</h2>
             <div id="warningList">暂无</div>
           </section>
+
+          <section id="aiPanel" class="ai-panel">
+            <h2>AI 知识块</h2>
+            <div class="ai-controls">
+              <label for="apiKeyInput">API Key</label>
+              <input id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-..." />
+
+              <label for="baseUrlInput">Base URL</label>
+              <input id="baseUrlInput" type="url" autocomplete="off" placeholder="默认 OpenAI 兼容接口" />
+
+              <label for="modelInput">Model</label>
+              <input id="modelInput" type="text" autocomplete="off" value="gpt-4.1-mini" />
+
+              <div class="ai-actions">
+                <button id="composeButton" type="button">组合讲解</button>
+                <button id="clearApiKeyButton" class="secondary-button" type="button">清空 Key</button>
+              </div>
+            </div>
+            <div id="selectedSummary" class="selected-summary">尚未选择知识块</div>
+            <div id="blockList" class="block-list">转换后显示知识块</div>
+            <div id="aiOutput" class="ai-output" aria-live="polite"></div>
+          </section>
         </aside>
 
         <section class="result">

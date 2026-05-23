@@ -257,3 +257,61 @@
 | 最新 review 输出 | `job_id=5ee2eb6737df49ae993921331840564d`，`render_visual_check.passed=true`，warnings 为空。 |
 | 截图复核 | 已打开 Review 第 4、23、35、36 页最新 PNG；第 36 页电路图未拆散，第 23 页条件文本恢复单行，公式主体比 base 清楚。 |
 | 验证 | `python -m unittest discover -s app\tests` 106 项通过；`python -m compileall app\backend` 通过；已重启 8765 并重新转换两个样例。 |
+## 2026-05-22 V4 块级 AI Agent 规划记录
+| 项目 | 记录 |
+|---|---|
+| 用户方案 | AI 讲义不做整页生成，改为每页拆成多个知识块，用户点击或勾选后只解释选中部分，降低 token 消耗和冗余 |
+| 路线结论 | 先生成 `knowledge_blocks.json`，再做 Web 块级交互和 AI 解释；PDF 融合后置，输出独立 `ai_guide.pdf` |
+| 安全边界 | API key 在网页填写，即填即用；后端只在当前请求使用，不写入文件、日志、缓存、URL 或报告 |
+| 规划产物 | 新增 `docs/superpowers/plans/2026-05-22-block-level-ai-agent.md` |
+| 本轮验证 | 仅做规划，未改源码，未运行测试 |
+
+## 2026-05-22 V4 块级 AI Agent MVP 执行记录
+| 项目 | 记录 |
+|---|---|
+| 知识块索引 | 新增 `knowledge_blocks.py`，转换后写出 `knowledge_blocks.json`，保守合并公式、媒体、动画遮挡和小图元图示块。 |
+| AI 解释链路 | 新增上下文裁剪、provider、解释器和来源审计；AI 只接收选中块证据，响应无合法来源会报错。 |
+| API key 边界 | Web password 输入；后端只从请求体读取，缓存 key 由模型、模式、块内容和 prompt 版本生成，不包含 API key。 |
+| Web 交互 | 首页新增 AI 知识块面板，支持单块“解释”和多选“组合讲解”；下载区暴露 `knowledge_blocks.json`。 |
+| 验证 | `python -m unittest discover app\tests` 121 项通过；`node --check app\frontend\app.js` 通过；已重启 8765 并真实转换 `app/samples/test.pptx`，`job_id=85ef96fbe3534278a0a3c2d3145bf5f7`，生成 4 页 18 个知识块。 |
+| 浏览器验收 | 首页 AI 面板可见，console error 为 0；无 API key 调 `/api/ai/explain` 返回 400，未外发模型请求。 |
+
+## 2026-05-22 AI Provider 401 收口
+| 项目 | 记录 |
+|---|---|
+| 问题 | 用户触发 AI 讲解后看到原始 `HTTP Error 401: Unauthorized`，说明 provider 鉴权失败被裸抛到前端。 |
+| 根因 | `ai_provider.py` 直接使用用户填写的 Base URL，并直接透传 `urllib.error.HTTPError`；填 `/v1` 根地址时不会自动补 `/chat/completions`。 |
+| 修复 | Base URL 自动规范化；401/403 转为中文提示，提醒检查 API key、Base URL、Model 同服务商、key 状态和额度，且不包含 key 内容。 |
+| 验证 | `python -m unittest app.tests.test_v4_ai_provider app.tests.test_v4_ai_explainer app.tests.test_v4_ai_security` 6 项通过；`python -m compileall app\backend` 通过；已重启 8765。 |
+
+## 2026-05-22 AI JSON 数组返回收口
+| 项目 | 记录 |
+|---|---|
+| 问题 | 用户触发 AI 生成时出现 `unhashable type: 'dict'`。 |
+| 根因 | 模型可能返回 JSON 数组，旧审计层对 list 做 `set()`，数组中的 dict 无法 hash。 |
+| 修复 | `_parse_response` 严格要求顶层是单个 JSON 对象；prompt 增加“不要返回数组”；审计层增加非 dict 防线。 |
+| 验证 | `python -m unittest app.tests.test_v4_ai_context app.tests.test_v4_ai_explainer app.tests.test_v4_ai_security app.tests.test_v4_ai_provider` 9 项通过；`python -m compileall app\backend` 通过；已重启 8765。 |
+
+## 2026-05-22 AI 来源短标收口
+| 项目 | 记录 |
+|---|---|
+| 问题 | AI 返回 `slide_text@p1#18`、`animation@p1#3` 等短标来源，被审计判为 Invalid source ref。 |
+| 根因 | prompt 只在证据区展示短来源，模型照抄字符串；审计只接受 JSON dict 来源。 |
+| 修复 | context 增加 `source_refs JSON`，prompt 增加可用来源 JSON；审计兼容短标并规范化为 `{kind, slide, object_id}`。 |
+| 验证 | `python -m unittest discover app\tests` 125 项通过；`node --check app\frontend\app.js` 通过；`/api/health` ok；已重启 8765。 |
+
+## 2026-05-22 AI 字段类型收口
+| 项目 | 记录 |
+|---|---|
+| 问题 | 前端显示 AI 结果时报 `items.forEach is not a function`。 |
+| 根因 | 模型可能把 `key_points`、`review_questions` 等数组字段返回成字符串或对象，前端直接 `forEach` 崩溃。 |
+| 修复 | 后端保存解释前把列表字段规范成数组；前端渲染增加 `asList/asText/formatSourceRef`，兼容字符串、对象、空值和短来源。 |
+| 验证 | `python -m unittest discover app\tests` 126 项通过；`node --check app\frontend\app.js` 通过；`python -m compileall app\backend` 通过；已重启 8765。 |
+
+## 2026-05-22 AI Provider 超时收口
+| 项目 | 记录 |
+|---|---|
+| 问题 | 用户触发 AI 生成时返回 `The read operation timed out`。 |
+| 根因 | 模型服务读响应超时未被捕获，且默认 provider 超时只有 60 秒。 |
+| 修复 | `ai_provider.py` 默认超时改为 180 秒，并捕获 `TimeoutError/socket.timeout`，返回“模型服务响应超时”的中文提示。 |
+| 验证 | `python -m unittest discover app\tests` 127 项通过；`node --check app\frontend\app.js` 通过；`python -m compileall app\backend` 通过；已重启 8765。 |

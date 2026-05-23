@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from ai_explainer import DEFAULT_MODEL, explain_blocks
 from converter import convert_pptx
 
 
@@ -74,10 +75,13 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path != "/api/convert":
-            self._send_json({"error": "not_found"}, status=404)
-            return
         try:
+            if parsed.path in {"/api/ai/explain", "/api/ai/compose"}:
+                self._handle_ai_request("compose" if parsed.path.endswith("/compose") else "explain")
+                return
+            if parsed.path != "/api/convert":
+                self._send_json({"error": "not_found"}, status=404)
+                return
             length = int(self.headers.get("Content-Length", "0"))
             upload = extract_uploaded_file(self.headers.get("Content-Type", ""), self.rfile.read(length))
             if not upload["filename"].lower().endswith(".pptx"):
@@ -93,6 +97,8 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
 
             result = convert_pptx(deck_path, output_dir, render_pdf=True)
             self._send_json(build_convert_response(job_id, result))
+        except ValueError as exc:
+            self._send_json({"status": "error", "error": str(exc)}, status=400)
         except Exception as exc:
             self._send_json({"status": "error", "error": str(exc)}, status=500)
 
@@ -126,10 +132,56 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _read_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            raise ValueError("Missing JSON body.")
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("Invalid JSON body.") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("JSON body must be an object.")
+        return payload
+
+    def _handle_ai_request(self, mode: str) -> None:
+        payload = self._read_json()
+        job_id = _safe_job_id(str(payload.get("job_id") or ""))
+        block_ids = payload.get("block_ids") or []
+        if isinstance(payload.get("block_id"), str):
+            block_ids = [payload["block_id"]]
+        if not isinstance(block_ids, list) or not all(isinstance(item, str) for item in block_ids):
+            raise ValueError("block_ids must be a list of strings.")
+        api_key = str(payload.get("api_key") or "").strip()
+        model = str(payload.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        base_url = str(payload.get("base_url") or "").strip() or None
+        output_dir = OUTPUTS_DIR / job_id
+        knowledge_path = output_dir / "knowledge_blocks.json"
+        if not knowledge_path.exists():
+            raise ValueError("Knowledge blocks for this job were not found.")
+        knowledge_blocks = json.loads(knowledge_path.read_text(encoding="utf-8"))
+        result = explain_blocks(
+            knowledge_blocks,
+            block_ids,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            mode=mode,
+            cache_dir=output_dir / "ai_cache",
+        )
+        self._send_json(result)
+
 
 def _safe_filename(filename: str) -> str:
     name = Path(filename).name
     return re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]", "_", name)
+
+
+def _safe_job_id(job_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", job_id):
+        raise ValueError("Invalid job id.")
+    return job_id
 
 
 def build_convert_response(job_id: str, result: dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +197,7 @@ def build_convert_response(job_id: str, result: dict[str, Any]) -> dict[str, Any
         "augment_plan_url": f"/outputs/{job_id}/augment_plan.json",
         "metrics_url": f"/outputs/{job_id}/metrics.json",
         "media_manifest_url": f"/outputs/{job_id}/media_manifest.json" if result.get("media_manifest_path") else None,
+        "knowledge_blocks_url": f"/outputs/{job_id}/knowledge_blocks.json" if result.get("knowledge_blocks_path") else None,
         "report_url": f"/outputs/{job_id}/report.json",
         "preview_url": f"/outputs/{job_id}/preview.html",
     }

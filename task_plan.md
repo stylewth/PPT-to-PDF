@@ -484,3 +484,14 @@
 | 单行数学文本保护 | complete | 对短比较式文本设置不换行，并在安全空隙内扩宽文本框。 |
 | 回归测试 | complete | 新增 Review 第 36 页电路图不重排、Review 第 23 页短数学文本不换行、稳定公式可用预览修复测试。 |
 | 最新验收 | complete | `test=a03c2c3d9d8149809e936ea33b80c898`，`review=5ee2eb6737df49ae993921331840564d`；完整 `render_visual_check.passed=true`，已查看第 23/36 页截图。 |
+## 2026-05-22 V4 块级 AI Agent 规划
+| 阶段 | 状态 | 目标 |
+|---|---|---|
+| V4A 知识块索引 | complete | 已生成 `knowledge_blocks.json`，支持正文、公式组、图示组、媒体时间线、动画流程等块 |
+| V4B Web 块级交互 | complete | Web 已按页展示知识块，支持单块解释按钮和多选组合讲解 |
+| V4C AI 解释 Agent | complete | 已接入 `/api/ai/explain` 与 `/api/ai/compose`；API key 只在当前请求使用，不写输出 |
+| V4D 来源审计与缓存 | complete | AI 结果必须带合法来源；缓存解释结果和用量，不缓存 key |
+| V4E AI 融合 PDF | pending | 用户确认后，把选中解释生成独立 `ai_guide.pdf`，不覆盖 `base.pdf` 和 `guide.pdf` |
+| V4F 比赛包装 | pending | 在 `compare.html` 展示块级解释、token 节省、可追溯来源和可选 AI PDF |
+
+详细执行计划见 `docs/superpowers/plans/2026-05-22-block-level-ai-agent.md`。

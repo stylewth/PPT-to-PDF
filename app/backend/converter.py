@@ -8,6 +8,7 @@ from typing import Any
 from augment_planner import build_augment_plan
 from compare_builder import write_compare_html
 from html_renderer import write_study_html
+from knowledge_blocks import build_knowledge_blocks, write_knowledge_blocks
 from media_processor import process_presentation_media
 from metrics_builder import build_metrics, write_metrics
 from native_converter import convert_pptx_to_pdf
@@ -42,6 +43,7 @@ def convert_pptx(
     compare_html_path = output / "compare.html"
     preview_html_path = output / "preview.html"
     media_manifest_path = output / "media_manifest.json"
+    knowledge_blocks_path = output / "knowledge_blocks.json"
 
     warnings = [
         warning
@@ -51,6 +53,8 @@ def convert_pptx(
 
     plan = build_augment_plan(analysis)
     media_manifest = process_presentation_media(pptx_path, presentation, output)
+    knowledge_blocks = build_knowledge_blocks(presentation, analysis, plan, media_manifest)
+    write_knowledge_blocks(knowledge_blocks_path, knowledge_blocks)
     base_pdf_path = None
     guide_pdf_path = None
     augment_plan_path = output / "augment_plan.json"
@@ -86,6 +90,7 @@ def convert_pptx(
     metrics = build_metrics(
         analysis,
         plan,
+        knowledge_blocks=knowledge_blocks,
         runtime_seconds=time.perf_counter() - started_at,
     )
     write_metrics(metrics_path, metrics)
@@ -104,6 +109,7 @@ def convert_pptx(
             "augment_plan_json": "augment_plan.json",
             "metrics_json": "metrics.json",
             "media_manifest_json": "media_manifest.json",
+            "knowledge_blocks_json": "knowledge_blocks.json",
             "preview_html": "preview.html",
             "report": "report.json",
         },
@@ -136,6 +142,7 @@ def convert_pptx(
         "augment_plan_path": str(augment_plan_path),
         "metrics_path": str(metrics_path),
         "media_manifest_path": str(media_manifest_path),
+        "knowledge_blocks_path": str(knowledge_blocks_path),
         "report_path": str(report_path),
         "preview_html_path": str(preview_html_path),
         "warnings": warnings,

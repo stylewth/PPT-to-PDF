@@ -46,3 +46,8 @@
 | 2026-05-21 | fallback 预览本身也可能是坏图；稳定公式只有在最终渲染失败且预览图通过可用性检查时才覆盖，不能用坏 fallback 去修正常原生渲染。|
 | 2026-05-22 | 电路图、流程图这类由很多短线条/小图元拼成的语义图，不能按单个形状对象级重排；如果一次计划移动大量小图元且缺少长文本锚点，应判定为图元碎片化风险并保持原页关系。|
 | 2026-05-22 | `a < r < b:`、`r > b` 这类短数学条件本质是单行条件文本，不是普通正文；LibreOffice 可能把它拆成多行，生成 guide deck 时应设置不换行并在安全空隙内扩宽文本框。|
+| 2026-05-22 | AI 接入出现 `HTTP Error 401: Unauthorized` 时，根因通常是 API key、Base URL、Model 不属于同一服务商或 key 无效；后端不能把 urllib 原始异常裸抛给前端，应转成可操作提示，并把 `/v1` 根地址规范化为 `/v1/chat/completions`。|
+| 2026-05-22 | AI 模型可能把要求的 JSON 对象返回成 JSON 数组；审计前必须先校验顶层类型，不能让 list/dict 进入 set 去重导致 `unhashable type: 'dict'`，prompt 也要明确“只返回一个 JSON 对象”。|
+| 2026-05-22 | 给模型看的来源如果只有 `slide_text@p1#18` 这类短标，模型会照抄字符串，导致严格审计报 Invalid source ref；prompt 必须提供可复制的 JSON 来源，后端也应把短标规范化为 `{kind, slide, object_id}` 后再审计。|
+| 2026-05-22 | AI 模型不一定严格按 schema 返回数组字段，可能把 `key_points`、`review_questions` 返回成字符串或对象；后端保存前要规范成数组，前端渲染也要用 `asList/asText` 防止 `items.forEach is not a function`。|
+| 2026-05-22 | AI provider 读响应可能抛 `The read operation timed out`，这属于模型服务慢或网络不稳；后端应捕获 `TimeoutError/socket.timeout` 转成中文提示，并给生成类请求更长默认超时。|
