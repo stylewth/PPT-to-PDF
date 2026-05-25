@@ -4,15 +4,70 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from ai_audit import audit_ai_explanation
 from ai_context import build_ai_context, build_whole_page_context
 from ai_provider import call_openai_compatible
 
 
-PROMPT_VERSION = "v5d-2026-05-24"
+PROMPT_VERSION = "v5h-2026-05-25"
 DEFAULT_MODEL = "gpt-4.1-mini"
 Provider = Callable[[dict[str, Any], str], Any]
+
+AI_EXPLANATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "block_id",
+        "short_explanation",
+        "detail",
+        "sections",
+        "key_points",
+        "common_misunderstanding",
+        "review_questions",
+        "source_refs",
+        "missing_context",
+        "confidence",
+    ],
+    "properties": {
+        "block_id": {"type": "string"},
+        "short_explanation": {"type": "string"},
+        "detail": {"type": "string"},
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["label", "items"],
+                "properties": {
+                    "label": {"type": "string"},
+                    "items": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "key_points": {"type": "array", "items": {"type": "string"}},
+        "common_misunderstanding": {"type": "array", "items": {"type": "string"}},
+        "review_questions": {"type": "array", "items": {"type": "string"}},
+        "source_refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["kind", "slide", "object_id", "block_id"],
+                "properties": {
+                    "kind": {"type": "string"},
+                    "slide": {"type": ["integer", "null"]},
+                    "object_id": {"type": ["string", "null"]},
+                    "block_id": {"type": ["string", "null"]},
+                },
+            },
+        },
+        "missing_context": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+    },
+}
 
 PROMPT_PROFILES = {
     "study": {
@@ -51,13 +106,27 @@ def explain_blocks(
         raise ValueError("API key is required.")
 
     context = build_ai_context(knowledge_blocks, block_ids, mode=mode, max_chars=max_chars)
-    cache_key = cache_key_for_request(model, mode, context, prompt_profile=prompt_profile, visual_inputs=visual_inputs)
+    cache_key = cache_key_for_request(
+        model,
+        mode,
+        context,
+        prompt_profile=prompt_profile,
+        visual_inputs=visual_inputs,
+        base_url=base_url,
+    )
     cache_path = _cache_path(cache_dir, cache_key)
     if cache_path and cache_path.exists():
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         return {**cached, "from_cache": True}
 
-    payload = _build_payload(model, mode, context, prompt_profile=prompt_profile, visual_inputs=visual_inputs)
+    payload = _build_payload(
+        model,
+        mode,
+        context,
+        prompt_profile=prompt_profile,
+        visual_inputs=visual_inputs,
+        base_url=base_url,
+    )
     raw_response = provider(payload, api_key) if provider else call_openai_compatible(payload, api_key, base_url=base_url)
     explanation = _parse_response(raw_response)
     explanation = _normalize_explanation(explanation, prompt_profile=prompt_profile)
@@ -106,13 +175,27 @@ def explain_page(
     mode = "whole_page"
     context = build_whole_page_context(page, max_chars=max_chars)
     block_ids = [str(block.get("id")) for block in context.get("blocks", []) if str(block.get("id") or "")]
-    cache_key = cache_key_for_request(model, mode, context, prompt_profile=prompt_profile, visual_inputs=visual_inputs)
+    cache_key = cache_key_for_request(
+        model,
+        mode,
+        context,
+        prompt_profile=prompt_profile,
+        visual_inputs=visual_inputs,
+        base_url=base_url,
+    )
     cache_path = _cache_path(cache_dir, cache_key)
     if cache_path and cache_path.exists():
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
         return {**cached, "from_cache": True}
 
-    payload = _build_payload(model, mode, context, prompt_profile=prompt_profile, visual_inputs=visual_inputs)
+    payload = _build_payload(
+        model,
+        mode,
+        context,
+        prompt_profile=prompt_profile,
+        visual_inputs=visual_inputs,
+        base_url=base_url,
+    )
     raw_response = provider(payload, api_key) if provider else call_openai_compatible(payload, api_key, base_url=base_url)
     explanation = _parse_response(raw_response)
     explanation = _normalize_explanation(explanation, prompt_profile=prompt_profile)
@@ -151,12 +234,14 @@ def cache_key_for_request(
     prompt_version: str = PROMPT_VERSION,
     prompt_profile: str = "study",
     visual_inputs: list[dict[str, str]] | None = None,
+    base_url: str | None = None,
 ) -> str:
     stable = {
         "model": model,
         "mode": mode,
         "prompt_version": prompt_version,
         "prompt_profile": _normalize_prompt_profile(prompt_profile),
+        "strict_json_schema": _supports_strict_json_schema(model, base_url),
         "visual_inputs": [
             {
                 "label": visual.get("label"),
@@ -187,6 +272,7 @@ def _build_payload(
     *,
     prompt_profile: str = "study",
     visual_inputs: list[dict[str, str]] | None = None,
+    base_url: str | None = None,
 ) -> dict[str, Any]:
     profile = PROMPT_PROFILES[_normalize_prompt_profile(prompt_profile)]
     section_labels = "、".join(profile["sections"])
@@ -197,7 +283,10 @@ def _build_payload(
         f"请只返回一个 JSON 对象，不要返回数组。字段包含 block_id, short_explanation, detail, "
         f"sections, source_refs, missing_context, confidence。sections 是数组，每项包含 label 和 items；"
         f"本角色只使用这些 section label：{section_labels}。source_refs 必须从可用来源 JSON 中复制，"
-        f"不要编造新 object_id；不要输出本角色以外的栏目。\n"
+        f"不要编造新 object_id；缺失的 object_id 或 block_id 填 null；不要输出本角色以外的栏目。所有公式、变量推导和单位换算必须使用 "
+        f"MathJax 定界符：行内公式写成 \\(...\\)，独立公式写成 \\[...\\]，不要输出裸 LaTeX。"
+        f"注意 JSON 字符串里的反斜杠必须双重转义：行内公式实际输出为 \\\\(...\\\\)，"
+        f"独立公式实际输出为 \\\\[...\\\\]。\n"
         f"可用来源 JSON: {json.dumps(context['source_refs'], ensure_ascii=False)}\n\n"
         f"证据:\n{context['context_text']}"
     )
@@ -214,7 +303,7 @@ def _build_payload(
     return {
         "model": model,
         "temperature": 0.2,
-        "response_format": {"type": "json_object"},
+        "response_format": _response_format_for_provider(model, base_url),
         "messages": [
             {
                 "role": "system",
@@ -228,6 +317,35 @@ def _build_payload(
     }
 
 
+def _response_format_for_provider(model: str, base_url: str | None = None) -> dict[str, Any]:
+    if not _supports_strict_json_schema(model, base_url):
+        return {"type": "json_object"}
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "slide2study_ai_explanation",
+            "strict": True,
+            "schema": AI_EXPLANATION_SCHEMA,
+        },
+    }
+
+
+def _supports_strict_json_schema(model: str, base_url: str | None = None) -> bool:
+    if not _is_openai_base_url(base_url):
+        return False
+    value = str(model or "").strip().lower()
+    if not value:
+        return False
+    return value.startswith(("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4"))
+
+
+def _is_openai_base_url(base_url: str | None) -> bool:
+    if not base_url:
+        return True
+    host = urlparse(str(base_url).strip()).netloc.lower()
+    return host == "api.openai.com"
+
+
 def _normalize_prompt_profile(prompt_profile: str) -> str:
     value = str(prompt_profile or "study").strip()
     return value if value in PROMPT_PROFILES else "study"
@@ -236,12 +354,21 @@ def _normalize_prompt_profile(prompt_profile: str) -> str:
 def _parse_response(raw_response: Any) -> dict[str, Any]:
     if isinstance(raw_response, dict) and "choices" in raw_response:
         content = raw_response["choices"][0]["message"]["content"]
-        return _ensure_response_object(json.loads(content))
+        return _ensure_response_object(_load_json_response(content))
     if isinstance(raw_response, str):
-        return _ensure_response_object(json.loads(raw_response))
+        return _ensure_response_object(_load_json_response(raw_response))
     if isinstance(raw_response, dict):
         return _ensure_response_object(raw_response)
     raise ValueError("AI provider returned unsupported response.")
+
+
+def _load_json_response(content: str) -> Any:
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as exc:
+        if not str(content or "").strip():
+            raise ValueError("AI 返回为空，请重试当前块。") from exc
+        raise ValueError("AI 返回不是合法 JSON，请重试当前块，或换用支持 JSON 输出的模型。") from exc
 
 
 def _ensure_response_object(value: Any) -> dict[str, Any]:

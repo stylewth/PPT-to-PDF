@@ -25,6 +25,13 @@ const explanationPanel = document.querySelector("#explanationPanel");
 const sendPageButton = document.querySelector("#sendPageButton");
 const readerHint = document.querySelector("#readerHint");
 
+const BLOCK_COLORS = ["#237a57", "#0b77bd", "#b35b00", "#7b3bb2", "#c21f39", "#65740b", "#006d6f", "#a33b7a"];
+const PROMPT_PROFILE_LABELS = {
+  study: "学习讲义版",
+  training: "工作培训版",
+  simple: "简单解释版"
+};
+
 let currentJobId = "";
 let currentResult = null;
 let currentKnowledge = null;
@@ -34,11 +41,14 @@ const readerState = {
   currentPage: 1,
   selectedBlockIds: new Set(),
   explanationsByBlockId: new Map(),
+  explanationsByProfileKey: new Map(),
   pageExplanationsByPage: new Map(),
+  pageExplanationsByProfileKey: new Map(),
   queue: [],
   queueStatusByBlockId: new Map(),
   errorsByBlockId: new Map(),
   activeBlockId: "",
+  hitCandidates: null,
   running: false
 };
 let selectedBlockIds = readerState.selectedBlockIds;
@@ -51,6 +61,7 @@ function setStep(index) {
 }
 
 function setWarnings(warnings) {
+  if (!warningList) return;
   warningList.innerHTML = "";
   if (!warnings.length) {
     warningList.textContent = "未发现明显遮挡或不支持动画";
@@ -151,11 +162,14 @@ function resetAIState() {
   readerState.selectedBlockIds = new Set();
   selectedBlockIds = readerState.selectedBlockIds;
   readerState.explanationsByBlockId = new Map();
+  readerState.explanationsByProfileKey = new Map();
   readerState.pageExplanationsByPage = new Map();
+  readerState.pageExplanationsByProfileKey = new Map();
   readerState.queue = [];
   readerState.queueStatusByBlockId = new Map();
   readerState.errorsByBlockId = new Map();
   readerState.activeBlockId = "";
+  readerState.hitCandidates = null;
   readerState.running = false;
   blockList.textContent = "转换后显示当前页知识块";
   aiOutput.textContent = "";
@@ -234,6 +248,8 @@ function renderGuidePage(page) {
     overlay.title = block.title || block.id;
     overlay.setAttribute("aria-label", `选择 ${block.title || block.id}`);
     Object.assign(overlay.style, bboxToStyle(block.display_bbox));
+    setStyleProperty(overlay, "--block-color", blockColor(index));
+    overlay.style.zIndex = String(index + 1);
 
     const mark = document.createElement("span");
     mark.className = "overlay-mark";
@@ -241,6 +257,7 @@ function renderGuidePage(page) {
     overlay.appendChild(mark);
     layer.appendChild(overlay);
   });
+  renderHitCandidates(layer, slide);
   wrapper.appendChild(layer);
   guidePageStage.appendChild(wrapper);
 }
@@ -257,8 +274,10 @@ function renderCurrentBlockList(page) {
   blockList.appendChild(heading);
 
   (slide.blocks || []).forEach((block) => {
+    const blockIndex = (slide.blocks || []).findIndex((item) => item.id === block.id);
     const row = document.createElement("article");
     row.className = `knowledge-block ${readerState.activeBlockId === block.id ? "active" : ""}`;
+    setStyleProperty(row, "--block-color", blockColor(blockIndex));
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
@@ -319,7 +338,7 @@ function renderExplanationPanel(page) {
     return;
   }
 
-  const pageExplanation = readerState.pageExplanationsByPage.get(Number(slide.number));
+  const pageExplanation = getPageExplanation(slide.number);
   if (pageExplanation) {
     const card = document.createElement("article");
     card.className = "explanation-card page-explanation-card";
@@ -332,6 +351,7 @@ function renderExplanationPanel(page) {
     cardHeader.append(blockTitle, source);
     card.appendChild(cardHeader);
     appendExplanationContent(card, pageExplanation);
+    appendPageProfileActions(card, slide.number);
     explanationPanel.appendChild(card);
   }
 
@@ -349,15 +369,24 @@ function renderExplanationPanel(page) {
     cardHeader.append(blockTitle, source);
     card.appendChild(cardHeader);
 
-    const explanation = readerState.explanationsByBlockId.get(block.id);
-    const error = readerState.errorsByBlockId.get(block.id);
+    const explanation = getBlockExplanation(block.id);
+    const error = getBlockError(block.id);
     if (explanation) {
       appendExplanationContent(card, explanation);
+      appendProfileActions(card, block.id);
     } else if (error) {
       const errorNode = document.createElement("p");
       errorNode.className = "error-copy";
       errorNode.textContent = error;
       card.appendChild(errorNode);
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "secondary-button";
+      retry.dataset.explainBlock = block.id;
+      retry.dataset.promptProfile = activePromptProfile();
+      retry.textContent = "重试";
+      retry.disabled = getBlockStatus(block.id) === "pending" || getBlockStatus(block.id) === "running";
+      card.appendChild(retry);
     } else {
       const summary = document.createElement("p");
       summary.textContent = block.summary || "尚未生成解释";
@@ -366,12 +395,48 @@ function renderExplanationPanel(page) {
       action.type = "button";
       action.className = "secondary-button";
       action.dataset.explainBlock = block.id;
+      action.dataset.promptProfile = activePromptProfile();
       action.textContent = statusLabel(getBlockStatus(block.id));
       action.disabled = getBlockStatus(block.id) === "pending" || getBlockStatus(block.id) === "running";
       card.appendChild(action);
     }
     explanationPanel.appendChild(card);
   });
+}
+
+function appendProfileActions(parent, blockId) {
+  const current = activePromptProfile();
+  const actions = document.createElement("div");
+  actions.className = "profile-actions";
+  Object.entries(PROMPT_PROFILE_LABELS).forEach(([profile, label]) => {
+    if (profile === current) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button";
+    button.dataset.explainBlock = blockId;
+    button.dataset.promptProfile = profile;
+    button.textContent = hasBlockExplanation(blockId, profile) ? `查看${label}` : `用${label}再讲`;
+    button.disabled = getBlockStatus(blockId, profile) === "pending" || getBlockStatus(blockId, profile) === "running";
+    actions.appendChild(button);
+  });
+  if (actions.children.length) parent.appendChild(actions);
+}
+
+function appendPageProfileActions(parent, pageNumber) {
+  const current = activePromptProfile();
+  const actions = document.createElement("div");
+  actions.className = "profile-actions";
+  Object.entries(PROMPT_PROFILE_LABELS).forEach(([profile, label]) => {
+    if (profile === current) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button";
+    button.dataset.explainPage = String(pageNumber);
+    button.dataset.promptProfile = profile;
+    button.textContent = hasPageExplanation(pageNumber, profile) ? `查看${label}` : `用${label}再讲`;
+    actions.appendChild(button);
+  });
+  if (actions.children.length) parent.appendChild(actions);
 }
 
 function appendExplanationContent(parent, explanation) {
@@ -393,10 +458,7 @@ function appendExplanationContent(parent, explanation) {
     appendList(parent, "复习题", explanation.review_questions);
   }
 
-  const refs = document.createElement("div");
-  refs.className = "source-refs";
-  refs.textContent = `来源：${asList(explanation.source_refs).map(formatSourceRef).filter(Boolean).join("，")}`;
-  parent.appendChild(refs);
+  typesetMath(parent);
 }
 
 function appendList(parent, label, items) {
@@ -430,6 +492,73 @@ function isValidBbox(bbox) {
   return x >= 0 && y >= 0 && w > 0 && h > 0 && x + w <= 1.001 && y + h <= 1.001;
 }
 
+function hitBlocksAtPoint(slide, x, y) {
+  return (slide?.blocks || [])
+    .map((block, index) => ({ block, index }))
+    .filter(({ block }) => {
+      const bbox = block.display_bbox || {};
+      if (!isValidBbox(bbox)) return false;
+      return x >= bbox.x && y >= bbox.y && x <= bbox.x + bbox.w && y <= bbox.y + bbox.h;
+    })
+    .sort((first, second) => second.index - first.index)
+    .map(({ block }) => block);
+}
+
+function renderHitCandidates(layer, slide) {
+  const hit = readerState.hitCandidates;
+  if (!hit || Number(hit.page) !== Number(readerState.currentPage) || !hit.blockIds?.length) return;
+  const menu = document.createElement("div");
+  menu.className = "hit-candidates";
+  menu.style.left = `${Math.min(Math.max(hit.x, 0.02), 0.86) * 100}%`;
+  menu.style.top = `${Math.min(Math.max(hit.y, 0.02), 0.86) * 100}%`;
+  hit.blockIds.forEach((blockId) => {
+    const block = (slide?.blocks || []).find((item) => item.id === blockId);
+    if (!block) return;
+    const index = (slide.blocks || []).findIndex((item) => item.id === blockId);
+    const option = document.createElement("button");
+    option.type = "button";
+    option.dataset.candidateBlockId = blockId;
+    setStyleProperty(option, "--block-color", blockColor(index));
+    option.textContent = `${index + 1}. ${block.title || blockId}`;
+    menu.appendChild(option);
+  });
+  if (menu.children.length) layer.appendChild(menu);
+}
+
+function setStyleProperty(node, name, value) {
+  if (node?.style?.setProperty) {
+    node.style.setProperty(name, value);
+  } else if (node?.style) {
+    node.style[name] = value;
+  }
+}
+
+function blockColor(index) {
+  const safeIndex = Number.isFinite(index) && index >= 0 ? index : 0;
+  return BLOCK_COLORS[safeIndex % BLOCK_COLORS.length];
+}
+
+function eventPointInGuidePage(event) {
+  const pageNode = event.target?.closest?.(".guide-page");
+  if (!pageNode?.getBoundingClientRect || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) {
+    return null;
+  }
+  const rect = pageNode.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return {
+    x: (event.clientX - rect.left) / rect.width,
+    y: (event.clientY - rect.top) / rect.height
+  };
+}
+
+function typesetMath(parent) {
+  const mathJax = globalThis.MathJax;
+  if (!mathJax?.typesetPromise) return;
+  mathJax.typesetPromise([parent]).catch((error) => {
+    console.warn("MathJax typeset failed", error);
+  });
+}
+
 function getCurrentReaderPage() {
   return readerState.pages.find((page) => Number(page.number) === Number(readerState.currentPage));
 }
@@ -457,9 +586,48 @@ function blockTypeLabel(type) {
   }[type] || "知识点";
 }
 
-function getBlockStatus(blockId) {
-  if (readerState.explanationsByBlockId.has(blockId)) return "done";
-  return readerState.queueStatusByBlockId.get(blockId) || "idle";
+function activePromptProfile() {
+  return promptProfileSelect.value || "study";
+}
+
+function profileKey(blockId, profile) {
+  return `${blockId}::${profile || activePromptProfile()}`;
+}
+
+function pageProfileKey(pageNumber, profile) {
+  return `${Number(pageNumber)}::${profile || activePromptProfile()}`;
+}
+
+function hasBlockExplanation(blockId, profile) {
+  return readerState.explanationsByProfileKey.has(profileKey(blockId, profile || activePromptProfile()));
+}
+
+function getBlockExplanation(blockId) {
+  return (
+    readerState.explanationsByProfileKey.get(profileKey(blockId, activePromptProfile())) ||
+    readerState.explanationsByBlockId.get(blockId)
+  );
+}
+
+function hasPageExplanation(pageNumber, profile) {
+  return readerState.pageExplanationsByProfileKey.has(pageProfileKey(pageNumber, profile || activePromptProfile()));
+}
+
+function getPageExplanation(pageNumber) {
+  return (
+    readerState.pageExplanationsByProfileKey.get(pageProfileKey(pageNumber, activePromptProfile())) ||
+    readerState.pageExplanationsByPage.get(Number(pageNumber))
+  );
+}
+
+function getBlockError(blockId) {
+  return readerState.errorsByBlockId.get(profileKey(blockId, activePromptProfile())) || readerState.errorsByBlockId.get(blockId);
+}
+
+function getBlockStatus(blockId, profile) {
+  const selectedProfile = profile || activePromptProfile();
+  if (hasBlockExplanation(blockId, selectedProfile)) return "done";
+  return readerState.queueStatusByBlockId.get(profileKey(blockId, selectedProfile)) || "idle";
 }
 
 function statusLabel(status) {
@@ -484,7 +652,7 @@ function hasApiKey() {
   return Boolean(apiKeyInput.value.trim());
 }
 
-function selectedApiConfig() {
+function selectedApiConfig(profileOverride = "") {
   const apiKey = apiKeyInput.value.trim();
   if (!apiKey) {
     throw new Error("请先填写 API Key");
@@ -493,16 +661,21 @@ function selectedApiConfig() {
     api_key: apiKey,
     base_url: baseUrlInput.value.trim(),
     model: modelInput.value.trim() || "gpt-4.1-mini",
-    prompt_profile: promptProfileSelect.value || "study",
+    prompt_profile: profileOverride || activePromptProfile(),
     include_images: Boolean(includeImagesInput.checked)
   };
 }
 
-function enqueueBlockExplanation(blockId) {
-  if (readerState.explanationsByBlockId.has(blockId)) return;
-  if (readerState.queue.some((item) => item.blockId === blockId)) return;
-  readerState.queueStatusByBlockId.set(blockId, "pending");
-  readerState.queue.push({ blockId, wholePage: false });
+function enqueueBlockExplanation(blockId, profile = activePromptProfile()) {
+  if (hasBlockExplanation(blockId, profile)) {
+    promptProfileSelect.value = profile;
+    renderReader();
+    return;
+  }
+  if (readerState.queue.some((item) => item.blockId === blockId && item.profile === profile)) return;
+  promptProfileSelect.value = profile;
+  readerState.queueStatusByBlockId.set(profileKey(blockId, profile), "pending");
+  readerState.queue.push({ blockId, wholePage: false, profile });
   renderReader();
   runExplanationQueue();
 }
@@ -511,10 +684,11 @@ function enqueueWholePageExplanation(pageNumber) {
   const slide = readerState.slidesByPage.get(Number(pageNumber));
   const block = slide?.blocks?.[0];
   if (!block) return;
-  if (readerState.explanationsByBlockId.has(block.id)) return;
-  if (readerState.queue.some((item) => item.blockId === block.id)) return;
-  readerState.queueStatusByBlockId.set(block.id, "pending");
-  readerState.queue.push({ blockId: block.id, wholePage: true, pageNumber: Number(pageNumber) });
+  const profile = activePromptProfile();
+  if (hasBlockExplanation(block.id, profile)) return;
+  if (readerState.queue.some((item) => item.blockId === block.id && item.profile === profile)) return;
+  readerState.queueStatusByBlockId.set(profileKey(block.id, profile), "pending");
+  readerState.queue.push({ blockId: block.id, wholePage: true, pageNumber: Number(pageNumber), profile });
   renderReader();
   runExplanationQueue();
 }
@@ -525,14 +699,15 @@ async function runExplanationQueue() {
   try {
     while (readerState.queue.length > 0) {
       const item = readerState.queue.shift();
-      readerState.queueStatusByBlockId.set(item.blockId, "running");
+      const statusKey = profileKey(item.blockId, item.profile);
+      readerState.queueStatusByBlockId.set(statusKey, "running");
       renderReader();
       try {
         await explainSingleBlock(item.blockId, item);
-        readerState.queueStatusByBlockId.delete(item.blockId);
+        readerState.queueStatusByBlockId.delete(statusKey);
       } catch (error) {
-        readerState.queueStatusByBlockId.set(item.blockId, "error");
-        readerState.errorsByBlockId.set(item.blockId, error.message);
+        readerState.queueStatusByBlockId.set(statusKey, "error");
+        readerState.errorsByBlockId.set(statusKey, error.message);
       }
       renderReader();
     }
@@ -546,7 +721,7 @@ async function explainSingleBlock(blockId, options = {}) {
   if (!currentJobId) {
     throw new Error("请先完成转换");
   }
-  const config = selectedApiConfig();
+  const config = selectedApiConfig(options.profile || activePromptProfile());
   const endpoint = options.wholePage ? "/api/ai/explain-page" : "/api/ai/explain";
   const body = options.wholePage
     ? { job_id: currentJobId, page_number: options.pageNumber, ...config }
@@ -560,16 +735,18 @@ async function explainSingleBlock(blockId, options = {}) {
   if (!response.ok || result.status !== "ok") {
     throw new Error(result.error || "AI 讲解失败");
   }
-  readerState.errorsByBlockId.delete(blockId);
-  readerState.explanationsByBlockId.set(blockId, result.explanation || {});
+  const explanation = { ...(result.explanation || {}), prompt_profile: config.prompt_profile };
+  readerState.errorsByBlockId.delete(profileKey(blockId, config.prompt_profile));
+  readerState.explanationsByProfileKey.set(profileKey(blockId, config.prompt_profile), explanation);
+  readerState.explanationsByBlockId.set(blockId, explanation);
   renderAIResult(result, blockId);
 }
 
-async function explainWholePage(pageNumber) {
+async function explainWholePage(pageNumber, profile = activePromptProfile()) {
   if (!currentJobId) {
     throw new Error("请先完成转换");
   }
-  const config = selectedApiConfig();
+  const config = selectedApiConfig(profile);
   const response = await fetch("/api/ai/explain-page", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -583,8 +760,10 @@ async function explainWholePage(pageNumber) {
   if (!response.ok || result.status !== "ok") {
     throw new Error(result.error || "AI 整页讲解失败");
   }
-  readerState.pageExplanationsByPage.set(Number(pageNumber), result.explanation || {});
-  renderAIResult(result);
+  const explanation = { ...(result.explanation || {}), prompt_profile: config.prompt_profile };
+  readerState.pageExplanationsByProfileKey.set(pageProfileKey(pageNumber, config.prompt_profile), explanation);
+  readerState.pageExplanationsByPage.set(Number(pageNumber), explanation);
+  renderAIResult({ ...result, explanation });
   renderReader();
 }
 
@@ -623,7 +802,7 @@ async function sendCurrentPage() {
   }
   try {
     setReaderMessage("整页解释生成中");
-    await explainWholePage(slide.number);
+    await explainWholePage(slide.number, activePromptProfile());
     setReaderMessage("整页解释已生成");
   } catch (error) {
     setReaderMessage(error.message);
@@ -722,12 +901,6 @@ function asText(value) {
   return String(value);
 }
 
-function formatSourceRef(ref) {
-  if (typeof ref === "string") return ref;
-  if (!ref || typeof ref !== "object") return "";
-  return `${ref.kind || "source"}@${ref.slide ? `p${ref.slide}` : "p?"}#${ref.object_id || ref.block_id || "?"}`;
-}
-
 function toggleBlockSelection(blockId) {
   if (!blockId) return;
   if (readerState.selectedBlockIds.has(blockId)) {
@@ -736,6 +909,7 @@ function toggleBlockSelection(blockId) {
     readerState.selectedBlockIds.add(blockId);
   }
   readerState.activeBlockId = blockId;
+  readerState.hitCandidates = null;
   renderReader();
 }
 
@@ -754,10 +928,35 @@ pageTabs?.addEventListener("click", (event) => {
   if (!page) return;
   readerState.currentPage = Number(page);
   readerState.activeBlockId = "";
+  readerState.hitCandidates = null;
   renderReader();
 });
 
 guidePageStage?.addEventListener("click", (event) => {
+  const candidateBlockId = event.target?.dataset?.candidateBlockId;
+  if (candidateBlockId) {
+    toggleBlockSelection(candidateBlockId);
+    return;
+  }
+  const point = eventPointInGuidePage(event);
+  if (point) {
+    const hits = hitBlocksAtPoint(getCurrentSlide(), point.x, point.y);
+    if (hits.length > 1) {
+      readerState.hitCandidates = {
+        page: readerState.currentPage,
+        x: point.x,
+        y: point.y,
+        blockIds: hits.map((block) => block.id)
+      };
+      readerState.activeBlockId = hits[0].id;
+      renderReader();
+      return;
+    }
+    if (hits.length === 1) {
+      toggleBlockSelection(hits[0].id);
+      return;
+    }
+  }
   const blockId = event.target?.dataset?.blockId || event.target?.parentElement?.dataset?.blockId;
   toggleBlockSelection(blockId);
 });
@@ -779,13 +978,14 @@ blockList.addEventListener("change", (event) => {
 blockList.addEventListener("click", (event) => {
   const target = event.target;
   const explainBlock = target?.dataset?.explainBlock;
+  const promptProfile = target?.dataset?.promptProfile || activePromptProfile();
   const focusTarget = target?.dataset?.focusBlock;
   if (explainBlock) {
     if (!hasApiKey()) {
       setReaderMessage("请先填写 API Key");
       return;
     }
-    enqueueBlockExplanation(explainBlock);
+    enqueueBlockExplanation(explainBlock, promptProfile);
     return;
   }
   if (focusTarget) {
@@ -795,13 +995,32 @@ blockList.addEventListener("click", (event) => {
 
 explanationPanel?.addEventListener("click", (event) => {
   const explainBlock = event.target?.dataset?.explainBlock;
+  const explainPage = event.target?.dataset?.explainPage;
+  const promptProfile = event.target?.dataset?.promptProfile || activePromptProfile();
   const focusTarget = event.target?.dataset?.focusBlock || event.target?.parentElement?.dataset?.focusBlock;
   if (explainBlock) {
     if (!hasApiKey()) {
       setReaderMessage("请先填写 API Key");
       return;
     }
-    enqueueBlockExplanation(explainBlock);
+    enqueueBlockExplanation(explainBlock, promptProfile);
+    return;
+  }
+  if (explainPage) {
+    const pageNumber = Number(explainPage);
+    promptProfileSelect.value = promptProfile;
+    if (hasPageExplanation(pageNumber, promptProfile)) {
+      renderReader();
+      return;
+    }
+    if (!hasApiKey()) {
+      setReaderMessage("请先填写 API Key");
+      return;
+    }
+    setReaderMessage("整页解释生成中");
+    explainWholePage(pageNumber, promptProfile)
+      .then(() => setReaderMessage("整页解释已生成"))
+      .catch((error) => setReaderMessage(error.message));
     return;
   }
   if (focusTarget) {
@@ -875,11 +1094,15 @@ form.addEventListener("submit", async (event) => {
     if (frame && result.guide_pdf_url) frame.src = result.guide_pdf_url;
   } catch (error) {
     setStep(0);
-    warningList.innerHTML = "";
-    const node = document.createElement("div");
-    node.className = "warning-item";
-    node.textContent = error.message;
-    warningList.appendChild(node);
+    resultTitle.textContent = "转换失败";
+    readerHint.textContent = error.message;
+    if (warningList) {
+      warningList.innerHTML = "";
+      const node = document.createElement("div");
+      node.className = "warning-item";
+      node.textContent = error.message;
+      warningList.appendChild(node);
+    }
   } finally {
     button.disabled = false;
     button.textContent = "重新转换";

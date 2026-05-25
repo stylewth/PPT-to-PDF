@@ -50,6 +50,64 @@ class V4KnowledgeBlocksTest(unittest.TestCase):
         self.assertGreater(formula["token_estimate"], 0)
         self.assertIn({"kind": "slide_text", "slide": 1, "object_id": "5"}, formula["source_refs"])
 
+    def test_single_large_text_box_is_not_dropped_as_title(self):
+        from knowledge_blocks import build_knowledge_blocks
+
+        presentation = _sample_presentation([_single_large_text_slide()])
+        analysis = analyze_presentation(presentation)
+
+        index = build_knowledge_blocks(presentation, analysis, {}, {})
+
+        slide_blocks = index["slides"][0]["blocks"]
+        self.assertEqual(len(slide_blocks), 1)
+        self.assertEqual(slide_blocks[0]["type"], "text_concept")
+        self.assertIn("Keywords:", "\n".join(slide_blocks[0]["texts"]))
+
+    def test_numbered_outline_bbox_expands_to_cover_visual_overflow(self):
+        from knowledge_blocks import build_knowledge_blocks
+
+        presentation = _sample_presentation([_numbered_outline_overflow_slide()])
+        analysis = analyze_presentation(presentation)
+
+        index = build_knowledge_blocks(presentation, analysis, {}, {})
+
+        block = next(block for block in index["slides"][0]["blocks"] if block["title"].startswith("1 Electric"))
+        self.assertGreaterEqual(block["display_bbox"]["y"] + block["display_bbox"]["h"], 0.78)
+        self.assertIn("5 Calculating Field from Potential", block["texts"][0])
+
+    def test_title_text_is_attached_to_first_body_block(self):
+        from knowledge_blocks import build_knowledge_blocks
+
+        presentation = _sample_presentation([_title_and_body_slide()])
+        analysis = analyze_presentation(presentation)
+
+        index = build_knowledge_blocks(presentation, analysis, {}, {})
+
+        block = index["slides"][0]["blocks"][0]
+        self.assertEqual(block["type"], "text_concept")
+        self.assertIn("章节标题", block["texts"])
+        self.assertIn("正文解释第一句。", block["texts"])
+        self.assertIn("2", block["object_ids"])
+        self.assertIn("3", block["object_ids"])
+
+    def test_dense_formula_diagram_merges_labels_formulas_and_visuals(self):
+        from knowledge_blocks import build_knowledge_blocks
+
+        presentation = _sample_presentation([_dense_formula_diagram_slide()])
+        analysis = analyze_presentation(presentation)
+
+        index = build_knowledge_blocks(presentation, analysis, {}, {})
+
+        blocks = index["slides"][0]["blocks"]
+        self.assertEqual(len(blocks), 1)
+        diagram = blocks[0]
+        self.assertEqual(diagram["type"], "diagram_group")
+        self.assertIn("q = q1 + q2 + q3", "\n".join(diagram["texts"]))
+        self.assertIn("+q1", diagram["texts"])
+        self.assertIn("caption", diagram["object_ids"])
+        self.assertIn("formula", diagram["object_ids"])
+        self.assertGreaterEqual(len(diagram["object_ids"]), 12)
+
     def test_media_manifest_creates_media_timeline_block(self):
         from knowledge_blocks import build_knowledge_blocks
 
@@ -98,7 +156,7 @@ class V4KnowledgeBlocksTest(unittest.TestCase):
         self.assertGreaterEqual(len(diagram_blocks[0]["object_ids"]), 8)
         self.assertLess(len(blocks), 4)
 
-    def test_animation_cover_relation_creates_animation_flow_block(self):
+    def test_animation_cover_relation_attaches_to_content_block(self):
         from knowledge_blocks import build_knowledge_blocks
 
         presentation = _sample_presentation([_animation_slide()])
@@ -106,11 +164,31 @@ class V4KnowledgeBlocksTest(unittest.TestCase):
 
         index = build_knowledge_blocks(presentation, analysis, {}, {})
 
-        flow = next(block for block in index["slides"][0]["blocks"] if block["type"] == "animation_flow")
-        self.assertIn("4", flow["object_ids"])
-        self.assertIn("5", flow["object_ids"])
-        self.assertEqual(flow["animation_steps"], [2])
-        self.assertIn({"kind": "animation", "slide": 1, "object_id": "5"}, flow["source_refs"])
+        blocks = index["slides"][0]["blocks"]
+        self.assertFalse(any(block["type"] == "animation_flow" for block in blocks))
+        content = next(block for block in blocks if {"4", "5"}.issubset(set(block["object_ids"])))
+        self.assertEqual(content["type"], "text_concept")
+        self.assertIn("初始位置", content["texts"])
+        self.assertIn("最终公式", content["texts"])
+        self.assertEqual(content["animation_steps"], [2])
+        self.assertIn({"kind": "animation", "slide": 1, "object_id": "5"}, content["source_refs"])
+
+    def test_dense_diagram_with_animation_stays_one_content_block(self):
+        from knowledge_blocks import build_knowledge_blocks
+
+        presentation = _sample_presentation([_dense_formula_diagram_with_animation_slide()])
+        analysis = analyze_presentation(presentation)
+
+        index = build_knowledge_blocks(presentation, analysis, {}, {})
+
+        blocks = index["slides"][0]["blocks"]
+        self.assertEqual(len(blocks), 1)
+        diagram = blocks[0]
+        self.assertEqual(diagram["type"], "diagram_group")
+        self.assertNotEqual(diagram["summary"], "动画步骤会覆盖前序对象，适合按前后关系解释。")
+        self.assertIn("q = q1 + q2 + q3", "\n".join(diagram["texts"]))
+        self.assertEqual(diagram["animation_steps"], [2])
+        self.assertIn({"kind": "animation", "slide": 1, "object_id": "q2"}, diagram["source_refs"])
 
     def test_reflowed_visual_bbox_is_used_for_reader_overlay(self):
         from knowledge_blocks import build_knowledge_blocks
@@ -138,9 +216,10 @@ class V4KnowledgeBlocksTest(unittest.TestCase):
         index = build_knowledge_blocks(presentation, analysis, plan, {})
 
         block = index["slides"][0]["blocks"][0]
-        self.assertEqual(block["object_ids"], ["4", "5"])
-        self.assertEqual(block["display_bbox"]["x"], 0.18)
-        self.assertEqual(block["display_bbox"]["w"], 0.65)
+        self.assertIn("4", block["object_ids"])
+        self.assertIn("5", block["object_ids"])
+        self.assertEqual(block["display_bbox"]["x"], 0.06)
+        self.assertEqual(block["display_bbox"]["w"], 0.77)
         self.assertIn({"kind": "visual", "slide": 1, "object_id": "5"}, block["source_refs"])
 
     def test_converter_writes_knowledge_blocks_and_server_frontend_expose_it(self):
@@ -191,6 +270,82 @@ def _formula_slide():
             _obj("5", "sp", "半径由速度、质量、电荷量和磁感应强度共同决定。", 450, 190, 360, 52, z=4),
         ],
     }
+
+
+def _single_large_text_slide():
+    text = (
+        "Keywords: Conservative Force, Potential Energy "
+        "Electric Potential, Electric Potential Energy, Electron-volt "
+        "Equipotential Surface Potential Difference, Zero Potential"
+    )
+    return {
+        "title": text,
+        "notes": "",
+        "animations": [],
+        "objects": [
+            _obj("2", "sp", text, 40, 40, 700, 260, z=1),
+        ],
+    }
+
+
+def _title_and_body_slide():
+    return {
+        "title": "章节标题",
+        "notes": "",
+        "animations": [],
+        "objects": [
+            _obj("2", "sp", "章节标题", 60, 30, 420, 48, z=1),
+            _obj("3", "sp", "正文解释第一句。", 70, 120, 520, 58, z=2),
+        ],
+    }
+
+
+def _numbered_outline_overflow_slide():
+    text = (
+        "1 Electric Potential & Potential Energy 电势和势能 "
+        "2 Electric Potential due to Point Charges 点电荷电势 "
+        "3 Calculating Potential from Field 从电场算电势 "
+        "4 Calculating Potential by Superposition 叠加原理算电势 "
+        "5 Calculating Field from Potential 从电势算电场"
+    )
+    return {
+        "title": text,
+        "notes": "",
+        "animations": [],
+        "objects": [
+            _obj("outline", "sp", text, 70, 136, 900, 260, z=1),
+            _obj("heading", "sp", "24 Electric Potential", 230, 42, 574, 56, z=2),
+        ],
+    }
+
+
+def _dense_formula_diagram_slide():
+    objects = [
+        _obj("title", "sp", "电容并联", 60, 30, 420, 48, z=1),
+        _obj("caption", "sp", "电路图和公式描述同一个并联电容关系。", 60, 500, 600, 58, z=30),
+        _obj("formula", "graphicFrame", "q = q1 + q2 + q3", 400, 370, 220, 50, z=29, name="公式"),
+        _obj("vformula", "graphicFrame", "V = V1 = V2 = V3", 70, 370, 220, 50, z=28, name="公式"),
+        _obj("q1", "sp", "+q1", 210, 140, 60, 32, z=20),
+        _obj("q2", "sp", "+q2", 360, 140, 60, 32, z=21),
+        _obj("q3", "sp", "+q3", 510, 140, 60, 32, z=22),
+        _obj("c1", "sp", "C1", 230, 250, 50, 32, z=23),
+        _obj("c2", "sp", "C2", 380, 250, 50, 32, z=24),
+        _obj("c3", "sp", "C3", 530, 250, 50, 32, z=25),
+    ]
+    for index in range(8):
+        objects.append(_obj(f"wire{index}", "shape", "", 160 + index * 55, 170 + (index % 2) * 70, 48, 18, z=2 + index))
+    return {"title": "电容并联", "notes": "", "animations": [], "objects": objects}
+
+
+def _dense_formula_diagram_with_animation_slide():
+    slide = _dense_formula_diagram_slide()
+    q1_box = next(obj for obj in slide["objects"] if obj["id"] == "q1")["bbox"]
+    next(obj for obj in slide["objects"] if obj["id"] == "q2")["bbox"] = dict(q1_box)
+    slide["animations"] = [
+        {"order": 1, "target_id": "q1", "target_text": "+q1", "kind": "appear", "supported": True},
+        {"order": 2, "target_id": "q2", "target_text": "+q2", "kind": "appear", "supported": True},
+    ]
+    return slide
 
 
 def _media_slide():

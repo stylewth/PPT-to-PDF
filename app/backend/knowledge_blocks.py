@@ -36,11 +36,13 @@ def build_knowledge_blocks(
         used: set[str] = set()
         blocks: list[dict[str, Any]] = []
 
-        _add_animation_blocks(blocks, slide, object_by_id, used, page)
         _add_media_blocks(blocks, slide_number, media_by_slide.get(slide_number, []), object_by_id, used, page)
+        _add_dense_diagram_block(blocks, slide_number, objects, used, page, title)
         _add_formula_blocks(blocks, slide_number, objects, used, page, title)
         _add_fragment_diagram_block(blocks, slide_number, objects, used, page, title)
         _add_text_blocks(blocks, slide_number, objects, used, page, title)
+        _attach_title_to_first_block(blocks, slide_number, objects, used, page, title)
+        _attach_animation_steps_to_blocks(blocks, slide, object_by_id, page)
 
         raw_blocks = blocks
         blocks = merge_animation_duplicates(blocks)
@@ -250,6 +252,65 @@ def _add_animation_blocks(
         )
 
 
+def _attach_animation_steps_to_blocks(
+    blocks: list[dict[str, Any]],
+    slide: dict[str, Any],
+    object_by_id: dict[str, dict[str, Any]],
+    page: dict[str, Any],
+) -> None:
+    slide_number = int(slide.get("number") or 0)
+    for step in slide.get("animation_steps", []):
+        covered_ids = [str(item) for item in step.get("covered_object_ids", []) if str(item)]
+        if not covered_ids and not step.get("covers_prior_object"):
+            continue
+        target_id = str(step.get("target_id") or "")
+        ids = _dedupe_strings([*covered_ids, target_id])
+        ids = [item for item in ids if item in object_by_id]
+        if not ids:
+            continue
+        order = int(step.get("order") or 0)
+        animation_ref = {
+            "kind": "animation",
+            "slide": slide_number,
+            "object_id": target_id,
+            "effect": step.get("effect") or step.get("action") or step.get("kind") or "",
+        }
+        source_ref = {"kind": "animation", "slide": slide_number, "object_id": target_id}
+        related_blocks = [
+            block
+            for block in blocks
+            if any(object_id in (block.get("object_ids") or []) for object_id in ids)
+        ]
+        if related_blocks:
+            target = _animation_target_block(related_blocks, ids)
+            for block in list(related_blocks):
+                if block is target or block.get("type") == "media_timeline":
+                    continue
+                _merge_block_into_block(target, block, page)
+                if block in blocks:
+                    blocks.remove(block)
+            for object_id in ids:
+                if object_id not in (target.get("object_ids") or []):
+                    _append_object_into_block(target, object_by_id[object_id], slide_number, page)
+            _attach_animation_ref(target, order, source_ref, animation_ref)
+            continue
+
+        objs = [object_by_id[object_id] for object_id in ids]
+        blocks.append(
+            _make_block(
+                "diagram_group",
+                slide_number,
+                objs,
+                page,
+                title=_first_text(objs) or "动画相关图示",
+                summary="这些对象在动画中形成同一关系，按内容整体解释。",
+                animation_steps=[order],
+                extra_refs=[source_ref],
+                animation_refs=[animation_ref],
+            )
+        )
+
+
 def _add_media_blocks(
     blocks: list[dict[str, Any]],
     slide_number: int,
@@ -314,6 +375,52 @@ def _add_formula_blocks(
                 summary="公式与邻近说明文字组成一个可解释知识点。",
             )
         )
+
+
+def _add_dense_diagram_block(
+    blocks: list[dict[str, Any]],
+    slide_number: int,
+    objects: list[dict[str, Any]],
+    used: set[str],
+    page: dict[str, Any],
+    title: str,
+) -> None:
+    available = [
+        obj
+        for obj in objects
+        if str(obj.get("id") or "")
+        and str(obj.get("id") or "") not in used
+        and obj.get("bbox")
+    ]
+    if not available:
+        return
+
+    title_objs = [obj for obj in available if _is_title(obj, title)]
+    content_objs = [obj for obj in available if obj not in title_objs]
+    dense_parts = [obj for obj in content_objs if _is_dense_diagram_part(obj)]
+    short_text_count = sum(1 for obj in dense_parts if _is_short_label(obj))
+    visual_count = sum(1 for obj in dense_parts if str(obj.get("type") or "") in VISUAL_TYPES)
+    formula_count = sum(1 for obj in dense_parts if _is_formula_object(obj))
+
+    if len(dense_parts) < 8:
+        return
+    if formula_count < 2 and visual_count < 6:
+        return
+    if short_text_count + formula_count < 5:
+        return
+
+    grouped = [*title_objs, *content_objs]
+    used.update(str(item.get("id") or "") for item in grouped)
+    blocks.append(
+        _make_block(
+            "diagram_group",
+            slide_number,
+            grouped,
+            page,
+            title=_first_text(grouped) or title or "图示结构",
+            summary="图示、公式和短标签共同构成一个知识点，按整体解释避免碎片化。",
+        )
+    )
 
 
 def _add_fragment_diagram_block(
@@ -386,6 +493,45 @@ def _add_text_blocks(
         )
 
 
+def _attach_title_to_first_block(
+    blocks: list[dict[str, Any]],
+    slide_number: int,
+    objects: list[dict[str, Any]],
+    used: set[str],
+    page: dict[str, Any],
+    title: str,
+) -> None:
+    if not blocks:
+        return
+    title_objs = [
+        obj
+        for obj in objects
+        if str(obj.get("id") or "")
+        and str(obj.get("id") or "") not in used
+        and _is_title(obj, title)
+    ]
+    if not title_objs:
+        return
+    candidates = [
+        block
+        for block in blocks
+        if block.get("type") in {"text_concept", "formula_group", "diagram_group"}
+        and any(str(text).strip() for text in block.get("texts", []) or [])
+    ]
+    if not candidates:
+        return
+    target = min(
+        candidates,
+        key=lambda block: (
+            float((block.get("source_bbox") or {}).get("y") or 0),
+            float((block.get("source_bbox") or {}).get("x") or 0),
+        ),
+    )
+    for obj in title_objs:
+        _merge_object_into_block(target, obj, slide_number, page)
+        used.add(str(obj.get("id") or ""))
+
+
 def _make_block(
     block_type: str,
     slide_number: int,
@@ -402,6 +548,7 @@ def _make_block(
     texts = [str(obj.get("text") or "").strip() for obj in objects if str(obj.get("text") or "").strip()]
     object_ids = [str(obj.get("id") or "") for obj in objects if str(obj.get("id") or "")]
     bbox = _union_bbox([obj.get("bbox") or {} for obj in objects])
+    bbox = _expand_bbox_for_text_overflow(block_type, bbox, texts, page)
     source_refs = _unique_refs(
         [
             {"kind": "slide_text", "slide": slide_number, "object_id": str(obj.get("id") or "")}
@@ -434,6 +581,84 @@ def _make_block(
         block["media"] = media
     block["content_hash"] = _content_hash(block)
     return block
+
+
+def _merge_object_into_block(block: dict[str, Any], obj: dict[str, Any], slide_number: int, page: dict[str, Any]) -> None:
+    object_id = str(obj.get("id") or "")
+    text = str(obj.get("text") or "").strip()
+    block["object_ids"] = _dedupe_strings([object_id, *block.get("object_ids", [])])
+    if text:
+        block["texts"] = _dedupe_strings([text, *block.get("texts", [])])
+    block["source_bbox"] = _union_bbox([obj.get("bbox") or {}, block.get("source_bbox") or {}])
+    block["display_bbox"] = _display_bbox(block["source_bbox"], page)
+    source_refs = list(block.get("source_refs", []))
+    if text:
+        source_refs.insert(0, {"kind": "slide_text", "slide": slide_number, "object_id": object_id})
+    elif str(obj.get("type") or "") in VISUAL_TYPES:
+        source_refs.insert(0, {"kind": "visual", "slide": slide_number, "object_id": object_id})
+    block["source_refs"] = _unique_refs(source_refs)
+    block["token_estimate"] = _estimate_tokens([block.get("title", ""), block.get("summary", ""), *block.get("texts", [])])
+    block["content_hash"] = _content_hash(block)
+
+
+def _append_object_into_block(block: dict[str, Any], obj: dict[str, Any], slide_number: int, page: dict[str, Any]) -> None:
+    object_id = str(obj.get("id") or "")
+    text = str(obj.get("text") or "").strip()
+    block["object_ids"] = _dedupe_strings([*block.get("object_ids", []), object_id])
+    if text:
+        block["texts"] = _dedupe_strings([*block.get("texts", []), text])
+    block["source_bbox"] = _union_bbox([block.get("source_bbox") or {}, obj.get("bbox") or {}])
+    block["display_bbox"] = _display_bbox(block["source_bbox"], page)
+    source_refs = list(block.get("source_refs", []))
+    if text:
+        source_refs.append({"kind": "slide_text", "slide": slide_number, "object_id": object_id})
+    elif str(obj.get("type") or "") in VISUAL_TYPES:
+        source_refs.append({"kind": "visual", "slide": slide_number, "object_id": object_id})
+    block["source_refs"] = _unique_refs(source_refs)
+    block["token_estimate"] = _estimate_tokens([block.get("title", ""), block.get("summary", ""), *block.get("texts", [])])
+    block["content_hash"] = _content_hash(block)
+
+
+def _merge_block_into_block(target: dict[str, Any], source: dict[str, Any], page: dict[str, Any]) -> None:
+    target["object_ids"] = _dedupe_strings([*target.get("object_ids", []), *source.get("object_ids", [])])
+    target["texts"] = _dedupe_strings([*target.get("texts", []), *source.get("texts", [])])
+    target["source_refs"] = _unique_refs([*target.get("source_refs", []), *source.get("source_refs", [])])
+    target["animation_refs"] = _unique_refs([*target.get("animation_refs", []), *source.get("animation_refs", [])])
+    target["source_bbox"] = _union_bbox([target.get("source_bbox") or {}, source.get("source_bbox") or {}])
+    target["display_bbox"] = _display_bbox(target["source_bbox"], page)
+    target["animation_steps"] = sorted(
+        {
+            int(step)
+            for step in [*target.get("animation_steps", []), *source.get("animation_steps", [])]
+            if str(step).strip()
+        }
+    )
+    target["token_estimate"] = _estimate_tokens([target.get("title", ""), target.get("summary", ""), *target.get("texts", [])])
+    target["content_hash"] = _content_hash(target)
+
+
+def _attach_animation_ref(
+    block: dict[str, Any],
+    order: int,
+    source_ref: dict[str, Any],
+    animation_ref: dict[str, Any],
+) -> None:
+    block["animation_steps"] = sorted({*block.get("animation_steps", []), order})
+    block["source_refs"] = _unique_refs([*block.get("source_refs", []), source_ref])
+    block["animation_refs"] = _unique_refs([*block.get("animation_refs", []), animation_ref])
+    block["token_estimate"] = _estimate_tokens([block.get("title", ""), block.get("summary", ""), *block.get("texts", [])])
+    block["content_hash"] = _content_hash(block)
+
+
+def _animation_target_block(blocks: list[dict[str, Any]], object_ids: list[str]) -> dict[str, Any]:
+    eligible = [block for block in blocks if block.get("type") != "media_timeline"] or blocks
+    return max(
+        eligible,
+        key=lambda block: (
+            sum(1 for object_id in object_ids if object_id in (block.get("object_ids") or [])),
+            len(block.get("texts", []) or []),
+        ),
+    )
 
 
 def _assign_block_ids(slide_number: int, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -504,6 +729,18 @@ def _is_formula_object(obj: dict[str, Any]) -> bool:
     return any(token in text for token in ("=", "<", ">", "≤", "≥", "∑", "√", "Δ", "π", "/", "^"))
 
 
+def _is_dense_diagram_part(obj: dict[str, Any]) -> bool:
+    obj_type = str(obj.get("type") or "")
+    if obj_type in VISUAL_TYPES:
+        return True
+    return _is_formula_object(obj) or _is_short_label(obj)
+
+
+def _is_short_label(obj: dict[str, Any]) -> bool:
+    text = str(obj.get("text") or "").strip()
+    return bool(text) and len(text) <= 18
+
+
 def _is_title(obj: dict[str, Any], title: str) -> bool:
     text = str(obj.get("text") or "").strip()
     if not text or not title:
@@ -511,7 +748,47 @@ def _is_title(obj: dict[str, Any], title: str) -> bool:
     if text != title.strip():
         return False
     bbox = obj.get("bbox") or {}
-    return int(bbox.get("y") or 0) <= 1200000
+    if len(text) > 80:
+        return False
+    return int(bbox.get("y") or 0) <= 1200000 and int(bbox.get("h") or 0) <= 900000
+
+
+def _expand_bbox_for_text_overflow(
+    block_type: str,
+    bbox: dict[str, int],
+    texts: list[str],
+    page: dict[str, Any],
+) -> dict[str, int]:
+    if block_type != "text_concept":
+        return bbox
+    item_count = _numbered_outline_count(texts)
+    if item_count < 4:
+        return bbox
+    page_height = int(page.get("height") or 0)
+    if page_height <= 0:
+        return bbox
+    expected_height = int(page_height * min(0.86, item_count * 0.105 + 0.035))
+    if expected_height <= int(bbox.get("h") or 0):
+        return bbox
+    top = int(bbox.get("y") or 0)
+    return {
+        **bbox,
+        "h": max(0, min(expected_height, page_height - top)),
+    }
+
+
+def _numbered_outline_count(texts: list[str]) -> int:
+    joined = " ".join(str(text or "") for text in texts)
+    numbers = [int(match) for match in re.findall(r"(?:^|\s)([1-9])\s+[A-Za-z]", joined)]
+    if not numbers:
+        return 0
+    unique = sorted(set(numbers))
+    count = 0
+    for expected in range(1, 10):
+        if expected not in unique:
+            break
+        count += 1
+    return count
 
 
 def _first_text(objects: list[dict[str, Any]]) -> str:

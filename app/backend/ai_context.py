@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import json
 from typing import Any
 
 
@@ -72,8 +71,7 @@ def build_whole_page_context(page: dict[str, Any], *, max_chars: int = 3000) -> 
         (
             f"页码: {page.get('number')}\n"
             f"页标题: {page.get('title') or ''}\n"
-            f"文本证据:\n{body}\n"
-            f"source_refs JSON: {json.dumps(source_refs, ensure_ascii=False)}"
+            f"文本证据:\n{body}"
         ),
         max_chars,
     )
@@ -108,7 +106,6 @@ def _flatten_blocks(knowledge_blocks: dict[str, Any]) -> dict[str, dict[str, Any
 
 def _block_context(block: dict[str, Any]) -> str:
     refs = ", ".join(_ref_label(ref) for ref in block.get("source_refs", []))
-    refs_json = json.dumps(block.get("source_refs", []), ensure_ascii=False)
     texts = "\n".join(f"- {text}" for text in block.get("texts", []) if str(text).strip())
     media = block.get("media") or {}
     media_line = f"\n媒体: {media.get('kind')} {media.get('status')}" if media else ""
@@ -120,8 +117,7 @@ def _block_context(block: dict[str, Any]) -> str:
         f"标题: {block.get('title')}\n"
         f"摘要: {block.get('summary')}{media_line}\n"
         f"文本证据:\n{texts}\n"
-        f"来源短标: {refs}\n"
-        f"source_refs JSON: {refs_json}"
+        f"来源短标: {refs}"
     )
 
 

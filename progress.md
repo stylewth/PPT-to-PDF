@@ -343,3 +343,48 @@
 | 前端 | AI 设置区新增“解释角色”和“发送页面图片”；“发送本页”改为生成当前页整体解释，并显示在右侧当前页面板；页级解释也会进入 AI PDF 导出。 |
 | 安全 | API key 仍只随当前请求进入后端；视觉输入进入缓存键只保存图片 hash，不保存 key。 |
 | 当前验证 | `python -m unittest discover app\tests` 152 项通过；`python -m compileall app\backend`、`node --check app\frontend\app.js` 通过；已重启 8765，`/api/health` 正常；真实转换 `test.pptx` 得到 `job_id=59a6377e5a9145da83ce6de1bdef0740`；本地 provider 冒烟确认整页/块级请求均带 1 张 guide 图；页级解释已导出 `ai_guide.pdf` 并渲染 `ai_guide_page2_smoke.png` 检查中文显示。 |
+
+## 2026-05-25 V5J 规则分组与 Web 交互记录
+| 项目 | 记录 |
+|---|---|
+| 用户决策 | 暂不做 AI 语义分组，按规则分组推进。 |
+| 根因定位 | Review 第 3 页空块来自标题误判；第 12/13 页过碎来自公式优先拆分和短标签独立成块；重叠框点击来自 overlay 按钮层叠。 |
+| 规划产物 | 新增 `docs/superpowers/plans/2026-05-25-rule-based-knowledge-blocks.md`。 |
+| 当前状态 | 已完成规则分组、彩色 overlay、重叠候选、AI 失败重试、LaTeX MathJax 渲染，并更新前端静态资源版本号避免旧缓存。 |
+| 验证 | `python -m unittest discover app\tests` 165 项通过；`python -m compileall app\backend`、`node --check app\frontend\app.js` 通过；已重启 8765，真实转换 Review 样例 `job_id=f228e14dd5c14461859413761903e8ea`。 |
+| 样例结果 | 第 3 页生成 1 个 `text_concept`，包含 Keywords；第 12/13 页各生成 1 个 `diagram_group`，电路图/公式/短标签不再被切碎。 |
+| 浏览器检查 | 已用浏览器工具打开本地服务；工具截图命令超时，前端交互改由定向 JS 测试锁住，视觉验收使用最新 `guide_preview` 第 3/12/13 页截图。 |
+
+## 2026-05-25 V5K 用户测试问题收口
+| 项目 | 记录 |
+|---|---|
+| 用户反馈 | 左侧问题报告噪声大；第 21 页块内容被动画描述抢占；块级 AI 报 `Expecting value`；公式未渲染。 |
+| 根因 | Web 仍展示 warning 面板；`knowledge_blocks` 先建 `animation_flow` 并占用对象；AI 非 JSON 解析错误裸抛；prompt 未强制公式定界符，旧缓存也会复用裸公式输出。 |
+| 修复 | 移除用户主界面问题报告；内容块先生成，动画改挂 `animation_refs`；非 JSON 转中文可操作错误；prompt 版本升到 `v5e-2026-05-25` 并要求 `\(...\)`/`\[...\]`。 |
+| 验证 | `python -m unittest discover app\tests` 169 项通过；`python -m compileall app\backend`、`node --check app\frontend\app.js` 通过；已重启 8765 并重新转换 Review 样例 `job_id=3eb565f87c164036b1d1670142970715`。 |
+| 样例结果 | 第 21 页现在为 1 个 `diagram_group`，包含 Gauss law、介质、电荷符号等内容，`animation_steps=[7,8]` 只作为证据；`render_visual_check.passed=true`。 |
+
+## 2026-05-25 V5L 用户二测问题收口
+| 项目 | 记录 |
+|---|---|
+| 用户反馈 | 第 21 页仍返回 JSON 错误；第 2 页目录第 5 条在框外；同一块想用其它 Agent 版本再讲一次。 |
+| 根因 | 部分兼容模型忽略 JSON mode；目录页 PPT bbox 小于渲染文字高度；前端解释状态只按 block id 存一份。 |
+| 修复 | 非 JSON 响应按纯文本低置信展示并保留来源审计；编号目录块按条目数扩展 overlay bbox；解释状态增加 `block_id + prompt_profile` 键并在解释卡显示其它角色重讲按钮。 |
+| 验证 | `python -m unittest discover app\tests` 171 项通过；`python -m compileall app\backend`、`node --check app\frontend\app.js` 通过；已重启 8765 并重新转换 Review 样例 `job_id=a01fe5565bda46e1ac7e58b48bab9dac`。 |
+
+## 2026-05-25 V5M 整页解释版本切换
+| 项目 | 记录 |
+|---|---|
+| 用户反馈 | 整页解释也应该像单块解释一样，可以切换其它 Agent 版本再讲。 |
+| 修复 | 整页解释按 `page_number + prompt_profile` 缓存，整页解释卡新增其它版本“再讲/查看”按钮。 |
+| 验证 | 已新增前端定向用例；`python -m unittest discover app\tests` 172 项通过，`node --check app\frontend\app.js` 和 `git diff --check` 通过。 |
+| 样例结果 | 第 2 页目录块 `display_bbox.h=0.56`，覆盖到第 5 条；第 21 页仍为 1 个 `diagram_group`，`animation_steps=[7,8]`；`render_visual_check.passed=true`。 |
+
+## 2026-05-25 Agent 式 AI PDF 编辑器规划记录
+| 项目 | 记录 |
+|---|---|
+| 用户反馈 | AI 版 PDF 不应塞入完整讲解卡；用户勾选讲解卡后，应由 AI 取舍哪些短补充值得进入 PDF，并建议如何融入原页空白处。 |
+| 路线结论 | 新增“AI PDF 编辑器”阶段：用户选择卡片，AI 做编辑取舍和短稿压缩，系统布局器决定是否放入安全空白、页边说明、拓展页或丢弃。 |
+| 防偏原则 | `base.pdf` 和 `guide.pdf` 不变；AI 不给最终坐标；完整解释留在 Web；PDF 只放高价值短补充；页内融入必须通过截图门禁。 |
+| 规划产物 | 新增 `docs/superpowers/plans/2026-05-25-agentic-ai-pdf-editor.md`，并同步更新 `task_plan.md` 与 `findings.md`。 |
+| 本轮验证 | 仅规划和文档落地，未改业务代码，未运行单元测试。 |

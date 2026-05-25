@@ -21,6 +21,7 @@ class V4AIContextTest(unittest.TestCase):
         self.assertNotIn("无关例题", context["context_text"])
         self.assertLessEqual(len(context["context_text"]), 500)
         self.assertEqual(context["source_refs"], [{"kind": "slide_text", "slide": 1, "object_id": "4"}])
+        self.assertNotIn("source_refs JSON", context["context_text"])
 
     def test_compose_context_keeps_selection_order_and_token_budget(self):
         from ai_context import build_ai_context
@@ -32,6 +33,23 @@ class V4AIContextTest(unittest.TestCase):
         self.assertEqual([block["id"] for block in context["blocks"]], ["s2_b1", "s1_b1"])
         self.assertLessEqual(len(context["context_text"]), 180)
         self.assertGreater(context["estimated_token_count"], 0)
+
+    def test_whole_page_context_keeps_source_refs_out_of_evidence_text(self):
+        from ai_context import build_whole_page_context
+
+        page = _knowledge_index()["slides"][0]
+
+        context = build_whole_page_context(page, max_chars=500)
+
+        self.assertIn("r = mv / qB", context["context_text"])
+        self.assertEqual(
+            context["source_refs"],
+            [
+                {"kind": "slide_text", "slide": 1, "object_id": "4"},
+                {"kind": "slide_text", "slide": 1, "object_id": "9"},
+            ],
+        )
+        self.assertNotIn("source_refs JSON", context["context_text"])
 
 
 def _knowledge_index():

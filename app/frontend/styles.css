@@ -334,7 +334,8 @@ button:disabled {
   gap: 8px;
   align-items: start;
   padding: 10px;
-  border: 1px solid var(--line);
+  border: 1px solid color-mix(in srgb, var(--block-color, var(--line)) 52%, var(--line));
+  border-left: 4px solid var(--block-color, var(--accent));
   border-radius: 8px;
   background: var(--paper);
 }
@@ -399,11 +400,6 @@ button:disabled {
 
 .ai-output ul {
   padding-left: 18px;
-}
-
-.source-refs {
-  color: var(--muted);
-  overflow-wrap: anywhere;
 }
 
 .reader {
@@ -495,22 +491,22 @@ button:disabled {
   position: absolute;
   min-height: 0;
   padding: 0;
-  border: 2px solid rgba(35, 122, 87, 0.48);
+  border: 2px solid color-mix(in srgb, var(--block-color, var(--accent)) 68%, transparent);
   border-radius: 6px;
-  background: rgba(35, 122, 87, 0.08);
-  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--block-color, var(--accent)) 14%, transparent);
+  color: var(--block-color, var(--accent-strong));
   cursor: pointer;
 }
 
 .block-overlay:hover,
 .block-overlay.active {
-  border-color: var(--accent-strong);
-  background: rgba(35, 122, 87, 0.15);
+  border-color: var(--block-color, var(--accent-strong));
+  background: color-mix(in srgb, var(--block-color, var(--accent)) 22%, transparent);
 }
 
 .block-overlay.selected {
-  border-color: #0d5138;
-  background: rgba(35, 122, 87, 0.22);
+  border-color: var(--block-color, #0d5138);
+  background: color-mix(in srgb, var(--block-color, var(--accent)) 30%, transparent);
 }
 
 .block-overlay.pending,
@@ -528,9 +524,46 @@ button:disabled {
   place-items: center;
   border-radius: 999px;
   color: #fff;
-  background: var(--accent);
+  background: var(--block-color, var(--accent));
   font-size: 11px;
   font-weight: 900;
+}
+
+.hit-candidates {
+  position: absolute;
+  z-index: 1000;
+  min-width: 168px;
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 24px rgba(23, 32, 27, 0.18);
+}
+
+.hit-candidates button {
+  width: 100%;
+  min-height: 30px;
+  padding: 0 8px;
+  border-color: color-mix(in srgb, var(--block-color, var(--accent)) 58%, var(--line));
+  color: var(--block-color, var(--accent-strong));
+  background: color-mix(in srgb, var(--block-color, var(--accent)) 10%, #fff);
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.profile-actions .secondary-button {
+  flex: 1 1 120px;
 }
 
 .explanation-panel {

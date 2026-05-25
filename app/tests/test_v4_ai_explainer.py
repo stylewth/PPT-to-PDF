@@ -151,6 +151,26 @@ class V4AIExplainerTest(unittest.TestCase):
         self.assertIn("JSON 对象", message)
         self.assertNotIn("unhashable", message)
 
+    def test_explain_blocks_rejects_non_json_instead_of_displaying_raw_content(self):
+        from ai_explainer import explain_blocks
+
+        def provider(payload, api_key):
+            return (
+                '{"block_id":"s1_b1","short_explanation":"解释。"}\n'
+                'source_refs: [{"kind":"slide_text","slide":1,"object_id":"4"}]'
+            )
+
+        with self.assertRaises(ValueError) as raised:
+            explain_blocks(
+                _knowledge_index(),
+                ["s1_b1"],
+                api_key="sk-test-secret",
+                provider=provider,
+            )
+
+        self.assertIn("合法 JSON", str(raised.exception))
+        self.assertNotIn("source_refs", str(raised.exception))
+
 
 def _knowledge_index():
     return {

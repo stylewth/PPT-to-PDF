@@ -152,6 +152,75 @@ class V5AIPromptProfilesTest(unittest.TestCase):
         self.assertEqual(user_content[1]["image_url"]["url"], "data:image/png;base64,abc")
         self.assertEqual(result["usage"]["visual_input_count"], 1)
 
+    def test_prompt_requires_mathjax_formula_delimiters(self):
+        from ai_explainer import explain_blocks
+
+        captured = {}
+
+        def provider(payload, api_key):
+            captured["payload"] = payload
+            return _ok_response()
+
+        explain_blocks(
+            _knowledge_index(),
+            ["s1_b1"],
+            api_key="sk-test",
+            provider=provider,
+        )
+
+        content = captured["payload"]["messages"][1]["content"]
+        self.assertIn("\\(...\\)", content)
+        self.assertIn("\\[...\\]", content)
+        self.assertIn("\\\\(...\\\\)", content)
+        self.assertIn("\\\\[...\\\\]", content)
+        self.assertIn("缺失的 object_id 或 block_id 填 null", content)
+        self.assertIn("公式", content)
+
+    def test_openai_models_use_strict_json_schema_response_format(self):
+        from ai_explainer import explain_blocks
+
+        captured = {}
+
+        def provider(payload, api_key):
+            captured["payload"] = payload
+            return _ok_response()
+
+        explain_blocks(
+            _knowledge_index(),
+            ["s1_b1"],
+            api_key="sk-test",
+            provider=provider,
+            model="gpt-4.1-mini",
+        )
+
+        response_format = captured["payload"]["response_format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertTrue(response_format["json_schema"]["strict"])
+        schema = response_format["json_schema"]["schema"]
+        self.assertIn("sections", schema["required"])
+        self.assertIn("source_refs", schema["required"])
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_third_party_compatible_models_keep_json_object_mode(self):
+        from ai_explainer import explain_blocks
+
+        captured = {}
+
+        def provider(payload, api_key):
+            captured["payload"] = payload
+            return _ok_response()
+
+        explain_blocks(
+            _knowledge_index(),
+            ["s1_b1"],
+            api_key="sk-test",
+            provider=provider,
+            model="deepseek-v4-pro",
+            base_url="https://example.com/v1",
+        )
+
+        self.assertEqual(captured["payload"]["response_format"], {"type": "json_object"})
+
     def test_explain_page_sends_one_whole_page_request(self):
         from ai_explainer import explain_page
 

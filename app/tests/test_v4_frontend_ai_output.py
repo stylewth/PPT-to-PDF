@@ -98,7 +98,10 @@ class V4FrontendAIOutputTest(unittest.TestCase):
               if (key === "classList") return undefined;
               return value;
             }});
-            if (!rendered.includes("单个要点") || !rendered.includes("为什么半径会变？") || !rendered.includes("slide_text@p1#18")) {{
+            if (!rendered.includes("单个要点") || !rendered.includes("为什么半径会变？")) {{
+              throw new Error(rendered);
+            }}
+            if (rendered.includes("slide_text@p1#18") || rendered.includes("来源")) {{
               throw new Error(rendered);
             }}
             """

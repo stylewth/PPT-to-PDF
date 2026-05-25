@@ -222,9 +222,6 @@ def _explanation_lines(explanation: dict[str, Any], max_chars: int) -> list[str]
             values = _as_list(explanation.get(field))
             for value in values:
                 parts.append(f"{label}: {value}")
-    refs = ", ".join(_ref_label(ref) for ref in _as_list(explanation.get("source_refs")))
-    if refs:
-        parts.append(f"Sources: {refs}")
     lines: list[str] = []
     for part in parts:
         lines.extend(_wrap_text(str(part), max_chars))
@@ -331,10 +328,3 @@ def _canonical_ref(ref: Any) -> str:
         normalized["block_id"] = str(ref.get("block_id"))
     return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
-
-def _ref_label(ref: Any) -> str:
-    if isinstance(ref, str):
-        return ref
-    if not isinstance(ref, dict):
-        return ""
-    return f"{ref.get('kind')}@p{ref.get('slide')}#{ref.get('object_id') or ref.get('block_id') or '?'}"

@@ -9,6 +9,12 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 
 
 class V5FrontendReaderTest(unittest.TestCase):
+    def test_frontend_no_longer_shows_problem_report_panel(self):
+        html = (ROOT_DIR / "app" / "frontend" / "index.html").read_text(encoding="utf-8")
+
+        self.assertNotIn("问题报告", html)
+        self.assertNotIn('id="warningList"', html)
+
     def test_reader_topbar_and_bbox_mapping(self):
         script = textwrap.dedent(
             f"""
@@ -629,6 +635,529 @@ class V5FrontendReaderTest(unittest.TestCase):
             }}
             if (context.__texts.includes("易错点") || context.__texts.includes("复习题")) {{
               throw new Error(context.__texts);
+            }}
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hit_blocks_at_point_returns_all_overlapping_blocks(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.checked = false;
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector() {{ return new FakeElement(); }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              fetch: async () => ({{ ok: true, json: async () => ({{}}) }}),
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              const slide = {{
+                blocks: [
+                  {{ id: "bottom", display_bbox: {{ x: 0.1, y: 0.1, w: 0.4, h: 0.4 }} }},
+                  {{ id: "top", display_bbox: {{ x: 0.2, y: 0.2, w: 0.4, h: 0.4 }} }}
+                ]
+              }};
+              globalThis.__hits = hitBlocksAtPoint(slide, 0.25, 0.25).map((block) => block.id).join("|");
+              `,
+              context
+            );
+            if (context.__hits !== "top|bottom") {{
+              throw new Error(context.__hits);
+            }}
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_error_card_keeps_retry_button_for_failed_block(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.checked = false;
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector() {{ return new FakeElement(); }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              fetch: async () => ({{ ok: true, json: async () => ({{}}) }}),
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              readerState.currentPage = 1;
+              readerState.slidesByPage.set(1, {{
+                number: 1,
+                blocks: [
+                  {{ id: "s1_b1", title: "A", display_bbox: {{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }}, source_refs: [] }}
+                ]
+              }});
+              readerState.errorsByBlockId.set("s1_b1", "模型不支持图片输入");
+              renderExplanationPanel({{ number: 1 }});
+              function hasRetry(node) {{
+                if (node.dataset && node.dataset.explainBlock === "s1_b1") return true;
+                return (node.children || []).some(hasRetry);
+              }}
+              globalThis.__hasRetry = hasRetry(explanationPanel);
+              `,
+              context
+            );
+            if (!context.__hasRetry) {{
+              throw new Error("retry button missing");
+            }}
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_generated_block_explanation_offers_other_profile_actions(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.checked = false;
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector() {{ return new FakeElement(); }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              fetch: async () => ({{ ok: true, json: async () => ({{}}) }}),
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              promptProfileSelect.value = "study";
+              readerState.currentPage = 1;
+              readerState.slidesByPage.set(1, {{
+                number: 1,
+                blocks: [
+                  {{ id: "s1_b1", title: "A", display_bbox: {{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }}, source_refs: [] }}
+                ]
+              }});
+              readerState.explanationsByBlockId.set("s1_b1", {{
+                short_explanation: "学习版解释",
+                detail: "学习版解释",
+                prompt_profile: "study",
+                source_refs: [{{ kind: "slide_text", slide: 1, object_id: "4" }}]
+              }});
+              renderExplanationPanel({{ number: 1 }});
+              function collectProfiles(node, acc = []) {{
+                if (node.dataset && node.dataset.promptProfile) acc.push(node.dataset.promptProfile);
+                (node.children || []).forEach((child) => collectProfiles(child, acc));
+                return acc;
+              }}
+              globalThis.__profiles = collectProfiles(explanationPanel).join("|");
+              `,
+              context
+            );
+            if (context.__profiles !== "training|simple") {{
+              throw new Error(context.__profiles);
+            }}
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_generated_page_explanation_offers_other_profile_actions(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.checked = false;
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector() {{ return new FakeElement(); }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              fetch: async () => ({{ ok: true, json: async () => ({{}}) }}),
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              promptProfileSelect.value = "study";
+              readerState.currentPage = 1;
+              readerState.slidesByPage.set(1, {{
+                number: 1,
+                blocks: [
+                  {{ id: "s1_b1", title: "A", display_bbox: {{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }}, source_refs: [] }}
+                ]
+              }});
+              readerState.pageExplanationsByPage.set(1, {{
+                short_explanation: "学习版整页解释",
+                detail: "学习版整页解释",
+                prompt_profile: "study",
+                source_refs: [{{ kind: "slide_text", slide: 1, object_id: "4" }}]
+              }});
+              renderExplanationPanel({{ number: 1 }});
+              function collectProfiles(node, acc = []) {{
+                if (node.dataset && node.dataset.explainPage) acc.push(node.dataset.explainPage + ":" + node.dataset.promptProfile);
+                (node.children || []).forEach((child) => collectProfiles(child, acc));
+                return acc;
+              }}
+              globalThis.__profiles = collectProfiles(explanationPanel).join("|");
+              `,
+              context
+            );
+            if (context.__profiles !== "1:training|1:simple") {{
+              throw new Error(context.__profiles);
+            }}
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_explanation_content_typesets_latex_with_mathjax(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.checked = false;
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector() {{ return new FakeElement(); }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const calls = [];
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              fetch: async () => ({{ ok: true, json: async () => ({{}}) }}),
+              MathJax: {{
+                typesetPromise(nodes) {{
+                  calls.push(nodes.length);
+                  return Promise.resolve();
+                }}
+              }},
+              calls,
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              const host = document.createElement("div");
+              appendExplanationContent(host, {{
+                short_explanation: "公式为 \\\\(C = q / V\\\\)",
+                detail: "推导为 $$C = C_1 + C_2$$",
+                source_refs: [{{ kind: "slide_text", slide: 1, object_id: "4" }}]
+              }});
+              globalThis.__calls = calls.length;
+              `,
+              context
+            );
+            if (context.__calls !== 1) {{
+              throw new Error(String(context.__calls));
             }}
             """
         )

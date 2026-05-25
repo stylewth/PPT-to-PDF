@@ -62,6 +62,8 @@ class V5AIPdfExporterTest(unittest.TestCase):
                 self.assertIn("AI Explanation", text)
                 self.assertIn("Conservative force", text)
                 self.assertIn("Electrostatic force is conservative.", text)
+                self.assertNotIn("Sources:", text)
+                self.assertNotIn("slide_text", text)
             finally:
                 exported.close()
 

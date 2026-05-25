@@ -4,7 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Slide2Study V3G</title>
-    <link rel="stylesheet" href="./styles.css?v=20260524b" />
+    <link rel="stylesheet" href="./styles.css?v=20260525c" />
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [["\\(", "\\)"]],
+          displayMath: [["$$", "$$"], ["\\[", "\\]"]]
+        }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
   </head>
   <body>
     <main class="shell">
@@ -33,11 +42,6 @@
               <li>LibreOffice 生成 base.pdf</li>
               <li>生成 guide.pdf、compare.html 和指标</li>
             </ol>
-          </section>
-
-          <section class="warning-block">
-            <h2>问题报告</h2>
-            <div id="warningList">暂无</div>
           </section>
 
           <section id="aiPanel" class="ai-panel">
@@ -104,6 +108,6 @@
       </section>
     </main>
 
-    <script src="./app.js?v=20260524b"></script>
+    <script src="./app.js?v=20260525c"></script>
   </body>
 </html>
