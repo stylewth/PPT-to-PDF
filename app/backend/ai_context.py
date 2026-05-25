@@ -27,8 +27,65 @@ def build_ai_context(
         "mode": mode,
         "blocks": selected,
         "context_text": context_text,
+        "evidence_text": context_text,
         "source_refs": source_refs,
+        "animation_refs": _unique_refs([ref for block in selected for ref in block.get("animation_refs", [])]),
         "estimated_token_count": max(1, math.ceil(len(context_text) / 2)),
+    }
+
+
+def build_single_block_context(
+    block: dict[str, Any],
+    *,
+    page_title: str = "",
+    max_chars: int = 1500,
+) -> dict[str, Any]:
+    selected = {"slide_title": page_title, **block}
+    evidence_text = _clip(_block_context(selected), max_chars)
+    return {
+        "mode": "explain",
+        "block": selected,
+        "blocks": [selected],
+        "evidence_text": evidence_text,
+        "context_text": evidence_text,
+        "source_refs": _unique_refs(selected.get("source_refs", []) or []),
+        "animation_refs": _unique_refs(selected.get("animation_refs", []) or []),
+        "estimated_token_count": max(1, math.ceil(len(evidence_text) / 2)),
+    }
+
+
+def build_whole_page_context(page: dict[str, Any], *, max_chars: int = 3000) -> dict[str, Any]:
+    texts = _dedupe_texts(
+        [
+            str(text).strip()
+            for block in page.get("blocks", []) or []
+            for text in block.get("texts", []) or []
+            if str(text).strip()
+        ]
+    )
+    source_refs = _unique_refs([ref for block in page.get("blocks", []) or [] for ref in block.get("source_refs", []) or []])
+    animation_refs = _unique_refs(
+        [ref for block in page.get("blocks", []) or [] for ref in block.get("animation_refs", []) or []]
+    )
+    body = "\n".join(f"- {text}" for text in texts)
+    evidence_text = _clip(
+        (
+            f"页码: {page.get('number')}\n"
+            f"页标题: {page.get('title') or ''}\n"
+            f"文本证据:\n{body}\n"
+            f"source_refs JSON: {json.dumps(source_refs, ensure_ascii=False)}"
+        ),
+        max_chars,
+    )
+    return {
+        "mode": "whole_page",
+        "page_number": int(page.get("number") or 0),
+        "blocks": page.get("blocks", []) or [],
+        "evidence_text": evidence_text,
+        "context_text": evidence_text,
+        "source_refs": source_refs,
+        "animation_refs": animation_refs,
+        "estimated_token_count": max(1, math.ceil(len(evidence_text) / 2)),
     }
 
 
@@ -90,3 +147,15 @@ def _unique_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         unique.append(ref)
     return unique
+
+
+def _dedupe_texts(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        key = " ".join(value.lower().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result

@@ -7,6 +7,7 @@ from typing import Any
 
 from augment_planner import build_augment_plan
 from compare_builder import write_compare_html
+from guide_preview import build_guide_preview
 from html_renderer import write_study_html
 from knowledge_blocks import build_knowledge_blocks, write_knowledge_blocks
 from media_processor import process_presentation_media
@@ -44,6 +45,7 @@ def convert_pptx(
     preview_html_path = output / "preview.html"
     media_manifest_path = output / "media_manifest.json"
     knowledge_blocks_path = output / "knowledge_blocks.json"
+    guide_preview_manifest_path = None
 
     warnings = [
         warning
@@ -76,6 +78,8 @@ def convert_pptx(
         )
         guide_pdf_path = guide_outputs.get("guide_pdf_path")
         augment_plan_path = guide_outputs["augment_plan_path"]
+        if guide_pdf_path:
+            guide_preview_manifest_path = build_guide_preview(guide_pdf_path, output)
     else:
         augment_plan_path.write_text(
             json.dumps(plan, ensure_ascii=False, indent=2),
@@ -104,6 +108,7 @@ def convert_pptx(
         "outputs": {
             "base_pdf": "base.pdf" if base_pdf_path else None,
             "guide_pdf": "guide.pdf" if guide_pdf_path else None,
+            "guide_preview_manifest": "guide_preview_manifest.json" if guide_preview_manifest_path else None,
             "compare_html": "compare.html" if base_pdf_path and guide_pdf_path else None,
             "analysis_json": "analysis.json",
             "augment_plan_json": "augment_plan.json",
@@ -137,6 +142,7 @@ def convert_pptx(
         "source": document["source"],
         "base_pdf_path": str(base_pdf_path) if base_pdf_path else None,
         "guide_pdf_path": str(guide_pdf_path) if guide_pdf_path else None,
+        "guide_preview_manifest_path": str(guide_preview_manifest_path) if guide_preview_manifest_path else None,
         "compare_html_path": str(compare_html_path) if base_pdf_path and guide_pdf_path else None,
         "analysis_path": str(analysis_path),
         "augment_plan_path": str(augment_plan_path),

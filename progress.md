@@ -315,3 +315,31 @@
 | 根因 | 模型服务读响应超时未被捕获，且默认 provider 超时只有 60 秒。 |
 | 修复 | `ai_provider.py` 默认超时改为 180 秒，并捕获 `TimeoutError/socket.timeout`，返回“模型服务响应超时”的中文提示。 |
 | 验证 | `python -m unittest discover app\tests` 127 项通过；`node --check app\frontend\app.js` 通过；`python -m compileall app\backend` 通过；已重启 8765。 |
+
+## 2026-05-23 A 方案实施计划记录
+| 项目 | 记录 |
+|---|---|
+| 用户选择 | 采用方案 A：块级解释为主，整页解释兜底。 |
+| 目标修正 | Web 主界面从调试列表改成 `guide.pdf` 阅读器；AI 解释必须贴近原文块展示。 |
+| 核心约束 | “发送本页”不能把整页一次发给 AI，而是对当前页知识块逐个排队生成，保证结果能对应回原文。 |
+| 块划分修正 | 同一文本因动画 appear/fade 重复出现时只保留一个内容块，动画作为证据引用挂载。 |
+| 规划产物 | 新增 `docs/superpowers/plans/2026-05-23-ai-guide-reader-ui.md`。 |
+| 本轮验证 | 仅写实施计划和规划记录，未改业务代码，未运行测试。 |
+
+## 2026-05-24 V5H 简单 AI PDF 导出记录
+| 项目 | 记录 |
+|---|---|
+| 后端 | 新增 `ai_pdf_exporter.py`，把已审计块级解释插入到对应 `guide.pdf` 源页之后，输出 `ai_guide.pdf` 和 `ai_guide_manifest.json`。 |
+| 接口 | `/api/ai/export-guide` 只接收 `job_id` 与 `explanations`，不接收 API key；导出前重新校验 block id 和 source refs。 |
+| 前端 | 新增“生成 AI PDF”按钮；至少生成一个块级解释后启用，导出成功后顶部 `AI 解释版` 下载入口可用。 |
+| 路线 | 新增 `docs/superpowers/plans/2026-05-24-ai-pdf-layout-route.md`，明确先插页、再编号锚点、再短旁注、最后融合重排。 |
+| 当前验证 | `python -m unittest discover app\tests` 141 项通过；`compileall`、`node --check` 通过；已重启 8765 并用 `test.pptx` 转换导出 `job_id=7c8c1344a1814fd3bd97cacf8568ac2b`，`guide.pdf` 4 页、`ai_guide.pdf` 5 页，AI 解释页截图已渲染检查。 |
+
+## 2026-05-24 V5I 多角色整页视觉 AI 记录
+| 项目 | 记录 |
+|---|---|
+| 后端 | 新增 `ai_visuals.py`，从 `guide_preview_manifest.json` 读取页图并生成整页或块裁剪 data URL；`ai_explainer.py` 支持多角色 prompt、多模态 payload 和整页解释。 |
+| 接口 | `/api/ai/explain-page` 改为真正整页解释，一页只发一次；`/api/ai/explain` 保持块级请求，可附带块图。 |
+| 前端 | AI 设置区新增“解释角色”和“发送页面图片”；“发送本页”改为生成当前页整体解释，并显示在右侧当前页面板；页级解释也会进入 AI PDF 导出。 |
+| 安全 | API key 仍只随当前请求进入后端；视觉输入进入缓存键只保存图片 hash，不保存 key。 |
+| 当前验证 | `python -m unittest discover app\tests` 152 项通过；`python -m compileall app\backend`、`node --check app\frontend\app.js` 通过；已重启 8765，`/api/health` 正常；真实转换 `test.pptx` 得到 `job_id=59a6377e5a9145da83ce6de1bdef0740`；本地 provider 冒烟确认整页/块级请求均带 1 张 guide 图；页级解释已导出 `ai_guide.pdf` 并渲染 `ai_guide_page2_smoke.png` 检查中文显示。 |

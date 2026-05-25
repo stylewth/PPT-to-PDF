@@ -40,7 +40,7 @@ class V4KnowledgeBlocksTest(unittest.TestCase):
 
         slide_blocks = index["slides"][0]["blocks"]
         self.assertEqual(index["kind"], "knowledge_blocks")
-        self.assertEqual(index["version"], "v4a")
+        self.assertEqual(index["version"], "v5a")
         self.assertFalse(any(block["title"] == "洛伦兹力半径" for block in slide_blocks))
         formula = next(block for block in slide_blocks if block["type"] == "formula_group")
         self.assertIn("4", formula["object_ids"])
@@ -111,6 +111,37 @@ class V4KnowledgeBlocksTest(unittest.TestCase):
         self.assertIn("5", flow["object_ids"])
         self.assertEqual(flow["animation_steps"], [2])
         self.assertIn({"kind": "animation", "slide": 1, "object_id": "5"}, flow["source_refs"])
+
+    def test_reflowed_visual_bbox_is_used_for_reader_overlay(self):
+        from knowledge_blocks import build_knowledge_blocks
+
+        presentation = _sample_presentation([_animation_visual_slide()])
+        analysis = analyze_presentation(presentation)
+        plan = {
+            "slides": [
+                {
+                    "source_slide": 1,
+                    "object_reflow": {
+                        "operations": [
+                            {
+                                "op": "move_resize",
+                                "id": "5",
+                                "from": {"x": 260, "y": 130, "w": 180, "h": 100},
+                                "to": {"x": 650, "y": 140, "w": 180, "h": 100},
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+
+        index = build_knowledge_blocks(presentation, analysis, plan, {})
+
+        block = index["slides"][0]["blocks"][0]
+        self.assertEqual(block["object_ids"], ["4", "5"])
+        self.assertEqual(block["display_bbox"]["x"], 0.18)
+        self.assertEqual(block["display_bbox"]["w"], 0.65)
+        self.assertIn({"kind": "visual", "slide": 1, "object_id": "5"}, block["source_refs"])
 
     def test_converter_writes_knowledge_blocks_and_server_frontend_expose_it(self):
         from server import build_convert_response
@@ -205,6 +236,22 @@ def _animation_slide():
             _obj("2", "sp", "动画遮挡", 60, 30, 520, 56, z=1),
             _obj("4", "sp", "初始位置", 180, 180, 220, 80, z=2),
             _obj("5", "sp", "最终公式", 190, 190, 220, 80, z=3),
+        ],
+    }
+
+
+def _animation_visual_slide():
+    return {
+        "title": "动画图示",
+        "notes": "",
+        "animations": [
+            {"order": 1, "target_id": "4", "target_text": "核心文字", "kind": "appear", "supported": True},
+            {"order": 2, "target_id": "5", "target_text": "图片 1", "kind": "appear", "supported": True},
+        ],
+        "objects": [
+            _obj("2", "sp", "动画图示", 60, 30, 520, 56, z=1),
+            _obj("4", "sp", "核心文字", 180, 130, 360, 100, z=2),
+            _obj("5", "pic", "", 260, 130, 180, 100, z=3, name="diagram.png"),
         ],
     }
 

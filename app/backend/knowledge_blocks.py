@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+import hashlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +11,7 @@ from typing import Any
 FRAGMENT_TYPES = {"shape", "cxnSp", "connector", "line", "freeform"}
 VISUAL_TYPES = FRAGMENT_TYPES | {"pic", "graphicFrame", "grpSp"}
 DYNAMIC_MEDIA_TYPES = {"gif", "video", "audio"}
-PROMPT_VERSION = "v4a"
+PROMPT_VERSION = "v5a"
 
 
 def build_knowledge_blocks(
@@ -18,13 +20,17 @@ def build_knowledge_blocks(
     augment_plan: dict[str, Any] | None = None,
     media_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    del augment_plan
     page = analysis.get("page") or presentation.get("page") or {}
     media_by_slide = _media_items_by_slide(media_manifest or {}, presentation)
+    reflow_targets_by_slide = _reflow_targets_by_slide(augment_plan or {})
     slides = []
     for slide in analysis.get("slides", []):
         slide_number = int(slide.get("number") or 0)
-        objects = [dict(obj) for obj in slide.get("object_boxes", []) if obj.get("bbox")]
+        objects = [
+            _with_reflowed_bbox(obj, reflow_targets_by_slide.get(slide_number, {}))
+            for obj in slide.get("object_boxes", [])
+            if obj.get("bbox")
+        ]
         object_by_id = {str(obj.get("id") or ""): obj for obj in objects}
         title = str(slide.get("title") or "").strip()
         used: set[str] = set()
@@ -36,11 +42,23 @@ def build_knowledge_blocks(
         _add_fragment_diagram_block(blocks, slide_number, objects, used, page, title)
         _add_text_blocks(blocks, slide_number, objects, used, page, title)
 
+        raw_blocks = blocks
+        blocks = merge_animation_duplicates(blocks)
+        if should_use_whole_page_fallback(raw_blocks):
+            fallback_reason = "duplicate_animation_text"
+            slide_blocks = [build_whole_page_block({"number": slide_number, "title": title, "blocks": raw_blocks}, fallback_reason)]
+            mode = "whole_page"
+        else:
+            fallback_reason = ""
+            slide_blocks = _assign_block_ids(slide_number, blocks)
+            mode = "blocks"
         slides.append(
             {
                 "number": slide_number,
                 "title": title,
-                "blocks": _assign_block_ids(slide_number, blocks),
+                "mode": mode,
+                "fallback_reason": fallback_reason,
+                "blocks": slide_blocks,
             }
         )
 
@@ -66,6 +84,130 @@ def write_knowledge_blocks(path: str | Path, blocks: dict[str, Any]) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(blocks, ensure_ascii=False, indent=2), encoding="utf-8")
     return output
+
+
+def _reflow_targets_by_slide(augment_plan: dict[str, Any]) -> dict[int, dict[str, dict[str, int]]]:
+    result: dict[int, dict[str, dict[str, int]]] = {}
+    for slide in augment_plan.get("slides", []) or []:
+        slide_number = int(slide.get("source_slide") or slide.get("number") or 0)
+        if not slide_number:
+            continue
+        operations = (slide.get("object_reflow") or {}).get("operations") or []
+        for operation in operations:
+            object_id = str(operation.get("id") or "")
+            target = operation.get("to") or {}
+            if not object_id or not all(key in target for key in ("x", "y", "w", "h")):
+                continue
+            result.setdefault(slide_number, {})[object_id] = {
+                key: int(target[key])
+                for key in ("x", "y", "w", "h")
+            }
+    return result
+
+
+def _with_reflowed_bbox(obj: dict[str, Any], targets: dict[str, dict[str, int]]) -> dict[str, Any]:
+    item = dict(obj)
+    target = targets.get(str(item.get("id") or ""))
+    if target:
+        item["bbox"] = dict(target)
+    return item
+
+
+def merge_animation_duplicates(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    by_key: dict[str, dict[str, Any]] = {}
+    for block in blocks:
+        current = dict(block)
+        current.setdefault("content_hash", _content_hash(current))
+        key = _duplicate_key(current)
+        existing = by_key.get(key)
+        if not existing:
+            by_key[key] = current
+            merged.append(current)
+            continue
+        existing["texts"] = _dedupe_strings([*existing.get("texts", []), *current.get("texts", [])])
+        existing["object_ids"] = _dedupe_strings([*existing.get("object_ids", []), *current.get("object_ids", [])])
+        existing["source_refs"] = _unique_refs([*existing.get("source_refs", []), *current.get("source_refs", [])])
+        existing["animation_refs"] = _unique_refs([*existing.get("animation_refs", []), *current.get("animation_refs", [])])
+        existing["source_bbox"] = _union_bbox([existing.get("source_bbox", {}) or {}, current.get("source_bbox", {}) or {}])
+        existing["display_bbox"] = _union_float_bbox(
+            [existing.get("display_bbox", {}) or {}, current.get("display_bbox", {}) or {}]
+        )
+        existing["animation_steps"] = sorted(
+            {
+                int(step)
+                for step in [*existing.get("animation_steps", []), *current.get("animation_steps", [])]
+                if str(step).strip()
+            }
+        )
+        existing["token_estimate"] = _estimate_tokens(
+            [existing.get("title", ""), existing.get("summary", ""), *existing.get("texts", [])]
+        )
+        if existing.get("type") == "animation_flow" and existing.get("texts"):
+            existing["type"] = "text_concept"
+        existing["content_hash"] = _content_hash(existing)
+    return merged
+
+
+def should_use_whole_page_fallback(
+    page_blocks: list[dict[str, Any]],
+    duplicate_ratio: float | None = None,
+    block_count: int | None = None,
+) -> bool:
+    count = block_count if block_count is not None else len(page_blocks)
+    if count <= 0:
+        return False
+    if duplicate_ratio is None:
+        hashes = [_duplicate_key(block) for block in page_blocks]
+        duplicate_ratio = 1 - (len(set(hashes)) / max(len(hashes), 1))
+    if duplicate_ratio >= 0.5 and count >= 5:
+        return True
+    animation_only = [
+        block
+        for block in page_blocks
+        if block.get("type") == "animation_flow" and not any(str(text).strip() for text in block.get("texts", []))
+    ]
+    return len(animation_only) == count and count >= 3
+
+
+def build_whole_page_block(page: dict[str, Any], fallback_reason: str) -> dict[str, Any]:
+    slide_number = int(page.get("number") or 0)
+    blocks = page.get("blocks", []) or []
+    texts = _dedupe_strings(
+        [
+            str(text).strip()
+            for block in blocks
+            for text in block.get("texts", []) or []
+            if str(text).strip()
+        ]
+    )
+    source_refs = _unique_refs([ref for block in blocks for ref in block.get("source_refs", []) or []])
+    if not source_refs and slide_number:
+        source_refs = [{"kind": "slide", "slide": slide_number, "object_id": "page"}]
+    animation_refs = _unique_refs([ref for block in blocks for ref in block.get("animation_refs", []) or []])
+    block = {
+        "id": f"s{slide_number}_page",
+        "type": "whole_page",
+        "title": f"第 {slide_number} 页整页解释" if slide_number else "整页解释",
+        "summary": fallback_reason,
+        "source_bbox": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "display_bbox": {"x": 0, "y": 0, "w": 1, "h": 1},
+        "object_ids": _dedupe_strings([obj for block in blocks for obj in block.get("object_ids", []) or []]),
+        "texts": texts,
+        "animation_steps": sorted(
+            {
+                int(step)
+                for block in blocks
+                for step in block.get("animation_steps", []) or []
+                if str(step).strip()
+            }
+        ),
+        "source_refs": source_refs,
+        "animation_refs": animation_refs,
+        "token_estimate": _estimate_tokens([page.get("title", ""), *texts]),
+    }
+    block["content_hash"] = _content_hash(block)
+    return block
 
 
 def _add_animation_blocks(
@@ -96,6 +238,14 @@ def _add_animation_blocks(
                 summary="动画步骤会覆盖前序对象，适合按前后关系解释。",
                 animation_steps=[int(step.get("order") or 0)],
                 extra_refs=[{"kind": "animation", "slide": slide_number, "object_id": target_id}],
+                animation_refs=[
+                    {
+                        "kind": "animation",
+                        "slide": slide_number,
+                        "object_id": target_id,
+                        "effect": step.get("effect") or step.get("action") or "",
+                    }
+                ],
             )
         )
 
@@ -247,6 +397,7 @@ def _make_block(
     animation_steps: list[int] | None = None,
     media: dict[str, Any] | None = None,
     extra_refs: list[dict[str, Any]] | None = None,
+    animation_refs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     texts = [str(obj.get("text") or "").strip() for obj in objects if str(obj.get("text") or "").strip()]
     object_ids = [str(obj.get("id") or "") for obj in objects if str(obj.get("id") or "")]
@@ -256,6 +407,13 @@ def _make_block(
             {"kind": "slide_text", "slide": slide_number, "object_id": str(obj.get("id") or "")}
             for obj in objects
             if str(obj.get("text") or "").strip()
+        ]
+        + [
+            {"kind": "visual", "slide": slide_number, "object_id": str(obj.get("id") or "")}
+            for obj in objects
+            if not str(obj.get("text") or "").strip()
+            and str(obj.get("id") or "")
+            and str(obj.get("type") or "") in VISUAL_TYPES
         ]
         + (extra_refs or [])
     )
@@ -269,10 +427,12 @@ def _make_block(
         "texts": texts,
         "animation_steps": animation_steps or [],
         "source_refs": source_refs,
+        "animation_refs": animation_refs or [],
         "token_estimate": _estimate_tokens([title, summary, *texts]),
     }
     if media:
         block["media"] = media
+    block["content_hash"] = _content_hash(block)
     return block
 
 
@@ -374,6 +534,54 @@ def _estimate_tokens(parts: list[str]) -> int:
     return max(1, math.ceil(chars / 2))
 
 
+def _content_hash(block: dict[str, Any]) -> str:
+    stable = {
+        "texts": [_normalize_text(text) for text in block.get("texts", []) if str(text).strip()],
+        "object_ids": sorted(str(item) for item in block.get("object_ids", []) if str(item).strip()),
+        "bbox": _rounded_bbox(block.get("display_bbox") or block.get("source_bbox") or {}),
+        "media": block.get("media") or {},
+    }
+    encoded = json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _duplicate_key(block: dict[str, Any]) -> str:
+    texts = [_normalize_text(text) for text in block.get("texts", []) if str(text).strip()]
+    bbox = _rounded_bbox(block.get("display_bbox") or block.get("source_bbox") or {})
+    if texts:
+        if block.get("animation_refs") or any(ref.get("kind") == "animation" for ref in block.get("source_refs", []) if isinstance(ref, dict)):
+            return json.dumps({"animation_texts": texts}, ensure_ascii=False, sort_keys=True)
+        return json.dumps({"texts": texts, "bbox": bbox}, ensure_ascii=False, sort_keys=True)
+    return str(block.get("content_hash") or _content_hash(block))
+
+
+def _normalize_text(text: Any) -> str:
+    value = " ".join(str(text or "").strip().lower().split())
+    return re.sub(r"([，。,.!?！？；;：:])\1+", r"\1", value)
+
+
+def _rounded_bbox(bbox: dict[str, Any]) -> dict[str, float]:
+    return {
+        key: round(float(bbox.get(key) or 0), 4)
+        for key in ("x", "y", "w", "h")
+    }
+
+
+def _dedupe_strings(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = _normalize_text(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
 def _union_bbox(boxes: list[dict[str, Any]]) -> dict[str, int]:
     valid = [box for box in boxes if all(key in box for key in ("x", "y", "w", "h"))]
     if not valid:
@@ -383,6 +591,22 @@ def _union_bbox(boxes: list[dict[str, Any]]) -> dict[str, int]:
     right = max(int(box["x"]) + int(box["w"]) for box in valid)
     bottom = max(int(box["y"]) + int(box["h"]) for box in valid)
     return {"x": left, "y": top, "w": right - left, "h": bottom - top}
+
+
+def _union_float_bbox(boxes: list[dict[str, Any]]) -> dict[str, float]:
+    valid = [box for box in boxes if all(key in box for key in ("x", "y", "w", "h"))]
+    if not valid:
+        return {"x": 0, "y": 0, "w": 0, "h": 0}
+    left = min(float(box["x"]) for box in valid)
+    top = min(float(box["y"]) for box in valid)
+    right = max(float(box["x"]) + float(box["w"]) for box in valid)
+    bottom = max(float(box["y"]) + float(box["h"]) for box in valid)
+    return {
+        "x": round(left, 6),
+        "y": round(top, 6),
+        "w": round(right - left, 6),
+        "h": round(bottom - top, 6),
+    }
 
 
 def _display_bbox(bbox: dict[str, int], page: dict[str, Any]) -> dict[str, float]:

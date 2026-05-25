@@ -491,7 +491,38 @@
 | V4B Web 块级交互 | complete | Web 已按页展示知识块，支持单块解释按钮和多选组合讲解 |
 | V4C AI 解释 Agent | complete | 已接入 `/api/ai/explain` 与 `/api/ai/compose`；API key 只在当前请求使用，不写输出 |
 | V4D 来源审计与缓存 | complete | AI 结果必须带合法来源；缓存解释结果和用量，不缓存 key |
-| V4E AI 融合 PDF | pending | 用户确认后，把选中解释生成独立 `ai_guide.pdf`，不覆盖 `base.pdf` 和 `guide.pdf` |
+| V4E AI 融合 PDF | complete | 已支持把已生成的块级解释导出为独立 `ai_guide.pdf`，不覆盖 `base.pdf` 和 `guide.pdf` |
 | V4F 比赛包装 | pending | 在 `compare.html` 展示块级解释、token 节省、可追溯来源和可选 AI PDF |
 
 详细执行计划见 `docs/superpowers/plans/2026-05-22-block-level-ai-agent.md`。
+
+## 2026-05-23 V5 AI 阅读器 UI 重构计划
+| 阶段 | 状态 | 目标 |
+|---|---|---|
+| V5A Guide 预览主视图 | complete | Web Preview 默认展示 `guide.pdf` 页图，并生成 `guide_preview_manifest.json` |
+| V5B 内容驱动知识块 | complete | 知识块按文字/图/媒体内容去重，动画只作为 `animation_refs` 证据，不再重复生成相同块 |
+| V5C 页图 Overlay 选择 | complete | 用户直接在 guide 页图上点选知识块，选中态可视化显示 |
+| V5D 单块 AI 队列 | complete | 每个块单独请求 AI；“发送本页”逐块排队，不做整页合并 prompt |
+| V5E 整页兜底 | complete | 分块不可靠时生成唯一 `whole_page` 块，支持页级最小上下文解释 |
+| V5F 侧栏锚定解释 | complete | AI 解释显示在当前页右侧并对应原文块，不再堆到页面底部 |
+| V5G AI 解释版预留 | complete | 顶栏 `AI 解释版` 在 `ai_guide.pdf` 生成后启用，不覆盖 `guide.pdf` |
+
+详细执行计划见 `docs/superpowers/plans/2026-05-23-ai-guide-reader-ui.md`。
+
+## 2026-05-24 V5H 简单 AI PDF 导出
+| 阶段 | 状态 | 目标 |
+|---|---|---|
+| 后端导出器 | complete | 复制 `guide.pdf`，在有解释的源页后插入 AI 解释页，输出 `ai_guide.pdf` 与 `ai_guide_manifest.json` |
+| Web 导出接口 | complete | `/api/ai/export-guide` 只接收 `job_id` 和已生成解释，不接收 API key |
+| 前端按钮 | complete | AI 解释生成后启用“生成 AI PDF”，成功后顶部 `AI 解释版` 下载入口变为可用 |
+| 后续排版路线 | complete | 已写入 `docs/superpowers/plans/2026-05-24-ai-pdf-layout-route.md` |
+
+## 2026-05-24 V5I 多角色整页视觉 AI
+| 阶段 | 状态 | 目标 |
+|---|---|---|
+| Prompt 角色 | complete | 支持学习讲义版、工作培训版、简单解释版三种角色，前端可选，后端进入缓存键 |
+| 视觉输入 | complete | AI 可接收 `guide.pdf` 渲染后的整页图或块裁剪图，不直接解析原始 PPT 图片 |
+| 整页解释 | complete | “发送本页”改为一次整体解释请求，避免逐块排队造成整页语义割裂 |
+| 块级解释 | complete | 单块解释仍保持单块请求，并可附带对应块的 guide 裁剪图 |
+| AI PDF 导出 | complete | 页级解释和块级解释都可进入 `ai_guide.pdf`，导出前继续做来源审计 |
+| 验证收口 | complete | 全量测试、重启 8765、真实样例转换和本地 provider 冒烟均已通过 |

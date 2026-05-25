@@ -51,3 +51,7 @@
 | 2026-05-22 | 给模型看的来源如果只有 `slide_text@p1#18` 这类短标，模型会照抄字符串，导致严格审计报 Invalid source ref；prompt 必须提供可复制的 JSON 来源，后端也应把短标规范化为 `{kind, slide, object_id}` 后再审计。|
 | 2026-05-22 | AI 模型不一定严格按 schema 返回数组字段，可能把 `key_points`、`review_questions` 返回成字符串或对象；后端保存前要规范成数组，前端渲染也要用 `asList/asText` 防止 `items.forEach is not a function`。|
 | 2026-05-22 | AI provider 读响应可能抛 `The read operation timed out`，这属于模型服务慢或网络不稳；后端应捕获 `TimeoutError/socket.timeout` 转成中文提示，并给生成类请求更长默认超时。|
+| 2026-05-24 | AI 角色不能只改 system prompt，输出 schema 和前端/AI PDF 展示标签也要跟着角色变化；否则工作培训版、简单解释版会继续显示学习版的“易错点/复习题”。|
+| 2026-05-24 | Web reader 的状态消息不能写入承载 guide 页图的 DOM 节点；对已有页图设置 `textContent` 会清空图片和 overlay，导致整页解释时 PDF 可视化消失。|
+| 2026-05-24 | 知识块 overlay 必须使用 guide 输出后的对象坐标；如果 `knowledge_blocks.json` 仍用 analysis 原始 bbox，经过 object_reflow 移动的图片/公式会看起来“不属于任何块”。|
+| 2026-05-24 | 同一段文字被多个动画目标覆盖时，知识块去重不能把 bbox 纳入动画文本键；应合并为一个块并把相关图片、公式的 visual source 和 bbox 并入同一知识点。|

@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from ai_explainer import DEFAULT_MODEL, explain_blocks
+from ai_pdf_exporter import export_ai_guide_pdf
+from ai_explainer import DEFAULT_MODEL, explain_blocks, explain_page
+from ai_visuals import build_block_visual_inputs, build_page_visual_inputs
 from converter import convert_pptx
 
 
@@ -76,8 +78,16 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
-            if parsed.path in {"/api/ai/explain", "/api/ai/compose"}:
-                self._handle_ai_request("compose" if parsed.path.endswith("/compose") else "explain")
+            if parsed.path in {"/api/ai/explain", "/api/ai/compose", "/api/ai/explain-page"}:
+                if parsed.path.endswith("/compose"):
+                    self._handle_ai_request("compose")
+                elif parsed.path.endswith("/explain-page"):
+                    self._handle_ai_page_request()
+                else:
+                    self._handle_ai_request("explain")
+                return
+            if parsed.path == "/api/ai/export-guide":
+                self._handle_ai_export_guide()
                 return
             if parsed.path != "/api/convert":
                 self._send_json({"error": "not_found"}, status=404)
@@ -157,18 +167,47 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
         model = str(payload.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
         base_url = str(payload.get("base_url") or "").strip() or None
         output_dir = OUTPUTS_DIR / job_id
-        knowledge_path = output_dir / "knowledge_blocks.json"
-        if not knowledge_path.exists():
-            raise ValueError("Knowledge blocks for this job were not found.")
-        knowledge_blocks = json.loads(knowledge_path.read_text(encoding="utf-8"))
-        result = explain_blocks(
-            knowledge_blocks,
+        result = explain_blocks_for_job(
+            job_id,
+            output_dir,
             block_ids,
             api_key=api_key,
             model=model,
             base_url=base_url,
             mode=mode,
-            cache_dir=output_dir / "ai_cache",
+            prompt_profile=str(payload.get("prompt_profile") or "study"),
+            include_images=_truthy(payload.get("include_images")),
+        )
+        self._send_json(result)
+
+    def _handle_ai_export_guide(self) -> None:
+        payload = self._read_json()
+        job_id = _safe_job_id(str(payload.get("job_id") or ""))
+        explanations = payload.get("explanations") or []
+        if not isinstance(explanations, list):
+            raise ValueError("explanations must be a list.")
+        response = export_ai_guide_for_job(job_id, OUTPUTS_DIR / job_id, explanations)
+        self._send_json(response)
+
+    def _handle_ai_page_request(self) -> None:
+        payload = self._read_json()
+        job_id = _safe_job_id(str(payload.get("job_id") or ""))
+        page_number = int(payload.get("page_number") or 0)
+        if page_number <= 0:
+            raise ValueError("page_number is required.")
+        api_key = str(payload.get("api_key") or "").strip()
+        model = str(payload.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        base_url = str(payload.get("base_url") or "").strip() or None
+        output_dir = OUTPUTS_DIR / job_id
+        result = explain_page_for_job(
+            job_id,
+            output_dir,
+            page_number,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            prompt_profile=str(payload.get("prompt_profile") or "study"),
+            include_images=_truthy(payload.get("include_images")),
         )
         self._send_json(result)
 
@@ -184,6 +223,14 @@ def _safe_job_id(job_id: str) -> str:
     return job_id
 
 
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def build_convert_response(job_id: str, result: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -192,6 +239,11 @@ def build_convert_response(job_id: str, result: dict[str, Any]) -> dict[str, Any
         "warnings": result["warnings"],
         "base_pdf_url": f"/outputs/{job_id}/base.pdf" if result.get("base_pdf_path") else None,
         "guide_pdf_url": f"/outputs/{job_id}/guide.pdf" if result.get("guide_pdf_path") else None,
+        "guide_preview_manifest_url": (
+            f"/outputs/{job_id}/guide_preview_manifest.json"
+            if result.get("guide_preview_manifest_path")
+            else None
+        ),
         "compare_url": f"/outputs/{job_id}/compare.html" if result.get("compare_html_path") else None,
         "analysis_url": f"/outputs/{job_id}/analysis.json",
         "augment_plan_url": f"/outputs/{job_id}/augment_plan.json",
@@ -200,7 +252,127 @@ def build_convert_response(job_id: str, result: dict[str, Any]) -> dict[str, Any
         "knowledge_blocks_url": f"/outputs/{job_id}/knowledge_blocks.json" if result.get("knowledge_blocks_path") else None,
         "report_url": f"/outputs/{job_id}/report.json",
         "preview_url": f"/outputs/{job_id}/preview.html",
+        "ai_guide_pdf_url": f"/outputs/{job_id}/ai_guide.pdf" if result.get("ai_guide_pdf_path") else None,
     }
+
+
+def explain_blocks_for_job(
+    job_id: str,
+    output_dir: Path,
+    block_ids: list[str],
+    *,
+    api_key: str,
+    model: str = DEFAULT_MODEL,
+    base_url: str | None = None,
+    mode: str = "explain",
+    prompt_profile: str = "study",
+    include_images: bool = False,
+    provider: Any | None = None,
+) -> dict[str, Any]:
+    _safe_job_id(job_id)
+    knowledge_blocks = _read_job_knowledge(output_dir)
+    visual_inputs = _block_visual_inputs_for_job(output_dir, knowledge_blocks, block_ids, include_images)
+    return explain_blocks(
+        knowledge_blocks,
+        block_ids,
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        mode=mode,
+        provider=provider,
+        cache_dir=output_dir / "ai_cache",
+        prompt_profile=prompt_profile,
+        visual_inputs=visual_inputs,
+    )
+
+
+def explain_page_for_job(
+    job_id: str,
+    output_dir: Path,
+    page_number: int,
+    *,
+    api_key: str,
+    model: str = DEFAULT_MODEL,
+    base_url: str | None = None,
+    prompt_profile: str = "study",
+    include_images: bool = False,
+    provider: Any | None = None,
+) -> dict[str, Any]:
+    _safe_job_id(job_id)
+    knowledge_blocks = _read_job_knowledge(output_dir)
+    page = _find_slide(knowledge_blocks, page_number)
+    if not page:
+        raise ValueError("Knowledge blocks for this page were not found.")
+    visual_inputs = build_page_visual_inputs(output_dir, page_number, include_images=include_images)
+    return explain_page(
+        page,
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        provider=provider,
+        cache_dir=output_dir / "ai_cache",
+        prompt_profile=prompt_profile,
+        visual_inputs=visual_inputs,
+    )
+
+
+def _read_job_knowledge(output_dir: Path) -> dict[str, Any]:
+    knowledge_path = output_dir / "knowledge_blocks.json"
+    if not knowledge_path.exists():
+        raise ValueError("Knowledge blocks for this job were not found.")
+    return json.loads(knowledge_path.read_text(encoding="utf-8"))
+
+
+def _block_visual_inputs_for_job(
+    output_dir: Path,
+    knowledge_blocks: dict[str, Any],
+    block_ids: list[str],
+    include_images: bool,
+) -> list[dict[str, str]]:
+    if not include_images:
+        return []
+    visuals: list[dict[str, str]] = []
+    for block_id in block_ids:
+        match = _find_block_with_slide(knowledge_blocks, block_id)
+        if not match:
+            raise ValueError(f"Knowledge block not found: {block_id}")
+        slide_number, block = match
+        visuals.extend(build_block_visual_inputs(output_dir, slide_number, block, include_images=True))
+    return visuals
+
+
+def _find_block_with_slide(knowledge_blocks: dict[str, Any], block_id: str) -> tuple[int, dict[str, Any]] | None:
+    for slide in knowledge_blocks.get("slides", []) or []:
+        slide_number = int(slide.get("number") or 0)
+        for block in slide.get("blocks", []) or []:
+            if str(block.get("id") or "") == block_id:
+                return slide_number, block
+    return None
+
+
+def export_ai_guide_for_job(job_id: str, output_dir: Path, explanations: list[dict[str, Any]]) -> dict[str, Any]:
+    safe_job_id = _safe_job_id(job_id)
+    guide_path = output_dir / "guide.pdf"
+    knowledge_path = output_dir / "knowledge_blocks.json"
+    if not guide_path.exists():
+        raise ValueError("Guide PDF for this job was not found.")
+    if not knowledge_path.exists():
+        raise ValueError("Knowledge blocks for this job were not found.")
+    knowledge_blocks = json.loads(knowledge_path.read_text(encoding="utf-8"))
+    ai_guide_path = export_ai_guide_pdf(guide_path, knowledge_blocks, explanations, output_dir)
+    return {
+        "status": "ok",
+        "ai_guide_pdf": ai_guide_path.name,
+        "ai_guide_pdf_url": f"/outputs/{safe_job_id}/ai_guide.pdf",
+        "ai_guide_manifest_url": f"/outputs/{safe_job_id}/ai_guide_manifest.json",
+    }
+
+
+def _find_slide(knowledge_blocks: dict[str, Any], page_number: int) -> dict[str, Any] | None:
+    for slide in knowledge_blocks.get("slides", []) or []:
+        if int(slide.get("number") or 0) == page_number:
+            return slide
+    return None
 
 
 def _safe_log(message: str) -> None:

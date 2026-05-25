@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Slide2Study V3G</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260524b" />
   </head>
   <body>
     <main class="shell">
@@ -41,7 +41,7 @@
           </section>
 
           <section id="aiPanel" class="ai-panel">
-            <h2>AI 知识块</h2>
+            <h2>AI 设置</h2>
             <div class="ai-controls">
               <label for="apiKeyInput">API Key</label>
               <input id="apiKeyInput" type="password" autocomplete="off" placeholder="sk-..." />
@@ -52,13 +52,26 @@
               <label for="modelInput">Model</label>
               <input id="modelInput" type="text" autocomplete="off" value="gpt-4.1-mini" />
 
+              <label for="promptProfileSelect">解释角色</label>
+              <select id="promptProfileSelect">
+                <option value="study">学习讲义版</option>
+                <option value="training">工作培训版</option>
+                <option value="simple">简单解释版</option>
+              </select>
+
+              <label class="checkbox-control" for="includeImagesInput">
+                <input id="includeImagesInput" type="checkbox" checked />
+                发送页面图片
+              </label>
+
               <div class="ai-actions">
                 <button id="composeButton" type="button">组合讲解</button>
+                <button id="exportAIButton" class="secondary-button" type="button">生成 AI PDF</button>
                 <button id="clearApiKeyButton" class="secondary-button" type="button">清空 Key</button>
               </div>
             </div>
             <div id="selectedSummary" class="selected-summary">尚未选择知识块</div>
-            <div id="blockList" class="block-list">转换后显示知识块</div>
+            <div id="blockList" class="block-list">转换后显示当前页知识块</div>
             <div id="aiOutput" class="ai-output" aria-live="polite"></div>
           </section>
         </aside>
@@ -71,11 +84,26 @@
             </div>
             <nav id="downloadLinks"></nav>
           </header>
-          <iframe id="previewFrame" title="转换结果预览"></iframe>
+          <section id="reader" class="reader" hidden>
+            <div class="reader-main">
+              <div class="reader-tools">
+                <div id="pageTabs" class="page-tabs" aria-label="页码"></div>
+                <button id="sendPageButton" class="send-page-button" type="button">发送本页</button>
+                <span id="readerHint" class="reader-hint"></span>
+              </div>
+              <div id="guidePageStage" class="guide-stage">转换后显示 guide 页图</div>
+            </div>
+            <aside id="explanationPanel" class="explanation-panel" aria-live="polite"></aside>
+          </section>
+          <details class="debug-details">
+            <summary>调试与报告</summary>
+            <nav id="debugLinks"></nav>
+          </details>
+          <iframe id="previewFrame" class="fallback-frame" title="PDF 备用预览"></iframe>
         </section>
       </section>
     </main>
 
-    <script src="./app.js"></script>
+    <script src="./app.js?v=20260524b"></script>
   </body>
 </html>
