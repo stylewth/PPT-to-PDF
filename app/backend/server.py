@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ai_pdf_exporter import export_ai_guide_pdf
+from ai_pdf_editor import edit_explanations_for_pdf
 from ai_explainer import DEFAULT_MODEL, explain_blocks, explain_page
 from ai_visuals import build_block_visual_inputs, build_page_visual_inputs
 from converter import convert_pptx
@@ -20,6 +22,90 @@ FRONTEND_DIR = APP_ROOT / "frontend"
 WORKSPACE_DIR = APP_ROOT / "workspace"
 UPLOADS_DIR = WORKSPACE_DIR / "uploads"
 OUTPUTS_DIR = WORKSPACE_DIR / "outputs"
+
+
+class ConvertJobStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict[str, Any]] = {}
+
+    def create(self, job_id: str, *, message: str = "等待上传") -> None:
+        with self._lock:
+            self._jobs[job_id] = {
+                "status": "running",
+                "job_id": job_id,
+                "percent": 0,
+                "message": message,
+                "stage": "queued",
+                "next_percent": 8,
+            }
+
+    def update(
+        self,
+        job_id: str,
+        *,
+        percent: int,
+        message: str,
+        stage: str,
+        next_percent: int | None = None,
+    ) -> None:
+        with self._lock:
+            job = self._require_job(job_id)
+            job.update(
+                {
+                    "status": "running",
+                    "percent": _clamp_percent(percent),
+                    "message": message,
+                    "stage": stage,
+                }
+            )
+            if next_percent is not None:
+                job["next_percent"] = _clamp_percent(next_percent)
+
+    def finish(self, job_id: str, result: dict[str, Any]) -> None:
+        with self._lock:
+            job = self._require_job(job_id)
+            job.update(
+                {
+                    "status": "done",
+                    "percent": 100,
+                    "message": "转换完成",
+                    "stage": "done",
+                    "next_percent": 100,
+                    "result": result,
+                }
+            )
+
+    def fail(self, job_id: str, error: str) -> None:
+        with self._lock:
+            job = self._require_job(job_id)
+            job.update(
+                {
+                    "status": "error",
+                    "percent": 100,
+                    "message": error,
+                    "stage": "error",
+                    "next_percent": 100,
+                    "error": error,
+                }
+            )
+
+    def snapshot(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._require_job(job_id))
+
+    def _require_job(self, job_id: str) -> dict[str, Any]:
+        try:
+            return self._jobs[job_id]
+        except KeyError as exc:
+            raise ValueError("Convert job was not found.") from exc
+
+
+CONVERT_JOBS = ConvertJobStore()
+
+
+def _clamp_percent(value: int | float) -> int:
+    return max(0, min(100, int(round(value))))
 
 
 def extract_uploaded_file(content_type: str, body: bytes) -> dict[str, Any]:
@@ -69,6 +155,14 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             self._send_json({"status": "ok"})
             return
+        if parsed.path == "/api/convert-status":
+            try:
+                query = parse_qs(parsed.query)
+                job_id = _safe_job_id(str((query.get("job_id") or [""])[0]))
+                self._send_json(CONVERT_JOBS.snapshot(job_id))
+            except ValueError as exc:
+                self._send_json({"status": "error", "error": str(exc)}, status=404)
+            return
         if parsed.path.startswith("/outputs/"):
             self._serve_file(OUTPUTS_DIR / unquote(parsed.path.removeprefix("/outputs/")))
             return
@@ -89,6 +183,9 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/ai/export-guide":
                 self._handle_ai_export_guide()
                 return
+            if parsed.path == "/api/ai/edit-pdf":
+                self._handle_ai_pdf_edit()
+                return
             if parsed.path != "/api/convert":
                 self._send_json({"error": "not_found"}, status=404)
                 return
@@ -105,8 +202,20 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
             deck_path = upload_dir / upload["filename"]
             deck_path.write_bytes(upload["content"])
 
-            result = convert_pptx(deck_path, output_dir, render_pdf=True)
-            self._send_json(build_convert_response(job_id, result))
+            CONVERT_JOBS.create(job_id, message="上传 PPTX")
+            CONVERT_JOBS.update(
+                job_id,
+                percent=8,
+                message="上传 PPTX",
+                stage="upload",
+                next_percent=18,
+            )
+            threading.Thread(
+                target=_run_convert_job,
+                args=(job_id, deck_path, output_dir),
+                daemon=True,
+            ).start()
+            self._send_json({"status": "accepted", "job_id": job_id})
         except ValueError as exc:
             self._send_json({"status": "error", "error": str(exc)}, status=400)
         except Exception as exc:
@@ -189,6 +298,25 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
         response = export_ai_guide_for_job(job_id, OUTPUTS_DIR / job_id, explanations)
         self._send_json(response)
 
+    def _handle_ai_pdf_edit(self) -> None:
+        payload = self._read_json()
+        job_id = _safe_job_id(str(payload.get("job_id") or ""))
+        explanations = payload.get("explanations") or []
+        if not isinstance(explanations, list):
+            raise ValueError("explanations must be a list.")
+        api_key = str(payload.get("api_key") or "").strip()
+        model = str(payload.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        base_url = str(payload.get("base_url") or "").strip() or None
+        response = edit_ai_pdf_for_job(
+            job_id,
+            OUTPUTS_DIR / job_id,
+            explanations,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+        )
+        self._send_json(response)
+
     def _handle_ai_page_request(self) -> None:
         payload = self._read_json()
         job_id = _safe_job_id(str(payload.get("job_id") or ""))
@@ -254,6 +382,23 @@ def build_convert_response(job_id: str, result: dict[str, Any]) -> dict[str, Any
         "preview_url": f"/outputs/{job_id}/preview.html",
         "ai_guide_pdf_url": f"/outputs/{job_id}/ai_guide.pdf" if result.get("ai_guide_pdf_path") else None,
     }
+
+
+def _run_convert_job(job_id: str, deck_path: Path, output_dir: Path) -> None:
+    def on_progress(event: dict[str, Any]) -> None:
+        CONVERT_JOBS.update(
+            job_id,
+            percent=int(event.get("percent") or 0),
+            message=str(event.get("message") or "转换中"),
+            stage=str(event.get("stage") or "running"),
+            next_percent=event.get("next_percent"),
+        )
+
+    try:
+        result = convert_pptx(deck_path, output_dir, render_pdf=True, progress=on_progress)
+        CONVERT_JOBS.finish(job_id, build_convert_response(job_id, result))
+    except Exception as exc:
+        CONVERT_JOBS.fail(job_id, str(exc))
 
 
 def explain_blocks_for_job(
@@ -366,6 +511,29 @@ def export_ai_guide_for_job(job_id: str, output_dir: Path, explanations: list[di
         "ai_guide_pdf_url": f"/outputs/{safe_job_id}/ai_guide.pdf",
         "ai_guide_manifest_url": f"/outputs/{safe_job_id}/ai_guide_manifest.json",
     }
+
+
+def edit_ai_pdf_for_job(
+    job_id: str,
+    output_dir: Path,
+    explanations: list[dict[str, Any]],
+    *,
+    api_key: str,
+    model: str = DEFAULT_MODEL,
+    base_url: str | None = None,
+    provider: Any | None = None,
+) -> dict[str, Any]:
+    _safe_job_id(job_id)
+    knowledge_blocks = _read_job_knowledge(output_dir)
+    return edit_explanations_for_pdf(
+        knowledge_blocks,
+        explanations,
+        api_key=api_key,
+        model=model,
+        base_url=base_url,
+        provider=provider,
+        cache_dir=output_dir / "ai_cache",
+    )
 
 
 def _find_slide(knowledge_blocks: dict[str, Any], page_number: int) -> dict[str, Any] | None:

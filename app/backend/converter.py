@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +17,13 @@ from native_converter import convert_pptx_to_pdf
 from object_reflow_planner import simulate_operations
 from pdf_augmenter import generate_guide_pdf
 from pptx_parser import parse_pptx
-from render_visual_check import check_rendered_pdf
+from render_visual_check import check_rendered_pdf, check_rendered_preview_images
 from reflow_visual_check import check_reflow_intent
 from slide_analyzer import analyze_presentation, summarize_analysis
 from study_builder import build_study_document
+
+
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 def convert_pptx(
@@ -29,13 +33,17 @@ def convert_pptx(
     render_pdf: bool = True,
     soffice_path: str | Path | None = None,
     command_runner=None,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
+    _emit_progress(progress, 8, "解析 PPTX", "parse", 18)
     presentation = parse_pptx(pptx_path)
     document = build_study_document(presentation)
+
+    _emit_progress(progress, 18, "分析课件结构", "analysis", 35)
     analysis = analyze_presentation(presentation)
 
     report_path = output / "report.json"
@@ -53,6 +61,7 @@ def convert_pptx(
         for warning in slide.get("warnings", [])
     ]
 
+    _emit_progress(progress, 35, "生成导读计划", "plan", 45)
     plan = build_augment_plan(analysis)
     media_manifest = process_presentation_media(pptx_path, presentation, output)
     knowledge_blocks = build_knowledge_blocks(presentation, analysis, plan, media_manifest)
@@ -61,12 +70,14 @@ def convert_pptx(
     guide_pdf_path = None
     augment_plan_path = output / "augment_plan.json"
     if render_pdf:
+        _emit_progress(progress, 58, "LibreOffice 生成 base.pdf", "base_pdf", 70)
         base_pdf_path = convert_pptx_to_pdf(
             pptx_path,
             output,
             soffice_path=soffice_path,
             command_runner=command_runner,
         )
+        _emit_progress(progress, 70, "生成 guide.pdf", "guide_pdf", 82)
         guide_outputs = generate_guide_pdf(
             pptx_path,
             output,
@@ -79,13 +90,16 @@ def convert_pptx(
         guide_pdf_path = guide_outputs.get("guide_pdf_path")
         augment_plan_path = guide_outputs["augment_plan_path"]
         if guide_pdf_path:
+            _emit_progress(progress, 82, "生成 guide 预览", "preview", 90)
             guide_preview_manifest_path = build_guide_preview(guide_pdf_path, output)
     else:
+        _emit_progress(progress, 82, "写入导读计划", "augment_plan", 90)
         augment_plan_path.write_text(
             json.dumps(plan, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
+    _emit_progress(progress, 90, "写入报告和指标", "report", 98)
     write_study_html(document, preview_html_path)
     analysis_path.write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2),
@@ -99,7 +113,12 @@ def convert_pptx(
     )
     write_metrics(metrics_path, metrics)
     reflow_intent_check = _build_reflow_intent_check(plan)
-    render_visual_check = _build_render_visual_check(guide_pdf_path, output, plan)
+    render_visual_check = _build_render_visual_check(
+        guide_pdf_path,
+        output,
+        plan,
+        guide_preview_manifest_path=guide_preview_manifest_path,
+    )
 
     report = {
         "kind": "conversion_report",
@@ -137,6 +156,7 @@ def convert_pptx(
             report=report,
         )
 
+    _emit_progress(progress, 98, "整理转换结果", "finalize", 100)
     return {
         "status": "ok",
         "source": document["source"],
@@ -153,6 +173,25 @@ def convert_pptx(
         "preview_html_path": str(preview_html_path),
         "warnings": warnings,
     }
+
+
+def _emit_progress(
+    progress: ProgressCallback | None,
+    percent: int,
+    message: str,
+    stage: str,
+    next_percent: int | None = None,
+) -> None:
+    if progress is None:
+        return
+    event: dict[str, Any] = {
+        "percent": percent,
+        "message": message,
+        "stage": stage,
+    }
+    if next_percent is not None:
+        event["next_percent"] = next_percent
+    progress(event)
 
 
 def _build_reflow_intent_check(plan: dict[str, Any]) -> dict[str, Any]:
@@ -181,13 +220,29 @@ def _build_reflow_intent_check(plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_render_visual_check(guide_pdf_path: str | Path | None, output: Path, plan: dict[str, Any]) -> dict[str, Any] | None:
+def _build_render_visual_check(
+    guide_pdf_path: str | Path | None,
+    output: Path,
+    plan: dict[str, Any],
+    *,
+    guide_preview_manifest_path: str | Path | None = None,
+) -> dict[str, Any] | None:
     if not guide_pdf_path:
         return None
+    pages = _render_check_pages(plan)
+    formula_regions = _render_formula_regions(plan)
+    if guide_preview_manifest_path and Path(guide_preview_manifest_path).exists():
+        return check_rendered_preview_images(
+            guide_preview_manifest_path,
+            pages=pages,
+            formula_regions=formula_regions,
+            screenshot_dir=output / "render_visual_check",
+            scale=1.2,
+        )
     return check_rendered_pdf(
         guide_pdf_path,
-        pages=_render_check_pages(plan),
-        formula_regions=_render_formula_regions(plan),
+        pages=pages,
+        formula_regions=formula_regions,
         screenshot_dir=output / "render_visual_check",
         scale=1.2,
     )

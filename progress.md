@@ -388,3 +388,82 @@
 | 防偏原则 | `base.pdf` 和 `guide.pdf` 不变；AI 不给最终坐标；完整解释留在 Web；PDF 只放高价值短补充；页内融入必须通过截图门禁。 |
 | 规划产物 | 新增 `docs/superpowers/plans/2026-05-25-agentic-ai-pdf-editor.md`，并同步更新 `task_plan.md` 与 `findings.md`。 |
 | 本轮验证 | 仅规划和文档落地，未改业务代码，未运行单元测试。 |
+
+## 2026-05-25 Agent 式 AI PDF 编辑器 MVP 执行记录
+| 项目 | 记录 |
+|---|---|
+| 交互收口 | 用户确认前端不展示 AI 取舍理由；主界面只做“AI 整理并生成 PDF”，理由留给调试/manifest 数据。 |
+| 后端 | 新增 `ai_pdf_editor.py`，把已生成讲解卡交给模型二次编辑，输出 include/drop、短稿、priority、layout_intent 和导出 payload。 |
+| 导出 | `ai_pdf_exporter.py` 识别 `pdf_snippet`，导出只写短稿；`include_in_pdf=false` 的项不进入 PDF，并写入 manifest 的 `dropped`。 |
+| 接口 | 新增 `/api/ai/edit-pdf` 和 `edit_ai_pdf_for_job`；`/api/ai/export-guide` 仍不接收 API key，只接收编辑后的导出项。 |
+| 前端 | “生成 AI PDF”改为先调用 AI 编辑接口，再调用导出接口；主界面不展示 importance/drop reason。 |
+| 验证 | `python -m unittest app.tests.test_v6_ai_pdf_editor app.tests.test_v5_ai_pdf_exporter app.tests.test_v5_ai_export_endpoint` 11 项通过；`python -m unittest app.tests.test_v5_frontend_reader` 12 项通过；`node --check app\frontend\app.js` 通过。 |
+| 后续 | 页内空白融入已做第一版几何避让；下一步应补自动截图门禁，判断文字裁剪和视觉效果。 |
+## 2026-05-25 Agent 式 AI PDF 编辑器执行收口
+| 项目 | 记录 |
+|---|---|
+| 路线 | 勾选讲解卡 -> AI 二次编辑取舍和压缩 -> 确定性布局器放入原页空白或拓展页 -> 输出独立 `ai_guide.pdf`。 |
+| 后端 | 新增 `ai_pdf_editor.py`；`server.py` 新增 `/api/ai/edit-pdf`；`ai_pdf_exporter.py` 支持 `pdf_snippet`、drop 记录、原页空白 note。 |
+| 前端 | “生成 AI PDF”改为先请求 AI 编辑器，再调用导出接口；默认不展示 importance/drop reason。 |
+| 验证 | `python -m unittest discover app\tests` 182 项通过；`python -m compileall app\backend`、`node --check app\frontend\app.js`、`git diff --check` 通过。 |
+| 样例 | 已重启 8765 并重新转换 `app/samples/test.pptx`，得到 `job_id=77ee5b881d314fce94ffd31a26a1b558`；AI PDF 第 4 页空白 note 截图已检查。 |
+
+## 2026-05-25 AI 笔记式融入路线规划
+| 项目 | 记录 |
+|---|---|
+| 用户反馈 | 当前 AI 解释导出仍会追加“AI Explanation - Page N”式解释页，不符合像做笔记一样融入原页的愿景。 |
+| 目标重定 | AI 版 PDF 应成为 `guide.pdf` 的笔记层：同页短旁注、箭头、下划线、高亮、公式说明和页边批注，而不是新增报告页。 |
+| 路线结论 | 默认 `ai_guide.pdf` 页数应等于 `guide.pdf`；空间不足时先扩展同一页画布或缩短笔记，不能静默追加解释页。 |
+| 规划产物 | 新增 `docs/superpowers/plans/2026-05-25-ai-notes-integration-route.md`，并同步更新 `task_plan.md`、`findings.md`。 |
+| 本轮验证 | 仅做目标和路线规划，未改业务代码，未运行单元测试。 |
+
+## 2026-05-26 V5N 选块式 AI 笔记执行
+| 项目 | 记录 |
+|---|---|
+| 用户确认 | AI 笔记路线可行；AI 内容继续按之前的选块模式进入 PDF。 |
+| 后端导出 | `ai_pdf_exporter.py` 默认不再追加 `AI Explanation` 页；放不进原页空白的短笔记会扩展同一逻辑页右侧笔记栏。 |
+| 前端导出 | `collectExportExplanations()` 改为只收集用户勾选且已有解释的块；整页解释不再自动进入 AI PDF。 |
+| AI 编辑器 | `ai_pdf_editor.py` 不再要求/建议 `extension_panel`，旧返回值会归一为同页 `margin_note`。 |
+| 中文笔记渲染 | 含中文的 AI 笔记采用“隐藏可提取文本 + 可见字体图片层”，避免 PyMuPDF 直接绘制中文时截图变问号。 |
+| 验证 | 已按 TDD 先跑出旧实现失败，再修复；全量测试 `188 passed`，后端编译和前端语法检查通过；视觉冒烟截图 `app/tests/.tmp_runs/ai_notes_perf_smoke/ai_guide_page1.png` 确认同页右侧中文笔记可见。 |
+
+## 2026-05-26 AI PDF 打开卡顿排查
+| 项目 | 记录 |
+|---|---|
+| 现象复现 | 最新 job `828740cbe5ae49139c357ffe57faca9d` 中，`ai_guide.pdf=1136.46MB`，`guide.pdf=26.34MB`，`base.pdf=0.83MB`。 |
+| 根因 | `ai_pdf_exporter.py` 逐页 `insert_pdf` 重建文档，破坏 guide PDF 的共享资源复用，导致大小接近 `guide.pdf × 42页`。 |
+| 修复 | 直接打开 `guide.pdf`，在原文档对象上加 AI 笔记层后另存为 `ai_guide.pdf`；中文隐藏文本不再嵌入 Windows CJK 字体。 |
+| 验证 | 新增资源复用回归测试，旧实现失败，新实现通过；同一 42 页样本临时重导出后 `ai_guide.pdf=0.84MB`。 |
+
+## 2026-05-26 AI 笔记样式优化
+| 项目 | 记录 |
+|---|---|
+| 视觉目标 | 从“网页卡片感”改成“课件旁批感”，保持同页短笔记路线。 |
+| 样式 | `study_note_v2`：浅纸色圆角框、轻阴影、左侧色条、短标题、柔和连接线、侧栏浅底。 |
+| 验证 | 新增样式回归测试；截图 `app/tests/.tmp_runs/note_style_smoke/ai_guide_page1.png` 已检查。 |
+
+## 2026-05-27 转换与 AI 响应性能优化启动
+| 项目 | 记录 |
+|---|---|
+| 用户目标 | 审查并优化当前转换速度和 AI 返回速度，功能保持不变。 |
+| 已读上下文 | 已读取 `lessons.md`、`task_plan.md`、`progress.md`、`findings.md`，注意旧 job 不可验收、AI PDF 仍以用户选块为准。 |
+| 并行审查 | 已派出两个只读子代理：一个看转换链路，一个看 AI 请求链路。 |
+| 当前状态 | 主线程继续本地定位热路径和可测试的性能根因。 |
+
+## 2026-05-27 转换与 AI 响应性能优化完成
+| 项目 | 记录 |
+|---|---|
+| 转换优化 | `render_visual_check` 支持复用 `guide_preview_manifest.json` 的页面 PNG，按旧视觉检查的 1.2 倍比例缩放后检查，避免同一页 PDF 二次 rasterize。 |
+| 性能 bug | `pages=[]` 不再被当成全页检查，空检查列表会直接返回空结果。 |
+| AI 优化 | 前端块解释队列改为 2 并发；运行中同块同角色不重复入队；整页解释已有本地缓存时不再 POST；同一选择二次导出 AI PDF 时复用最近一次 AI PDF 编辑结果。 |
+| 验证 | `python -m unittest discover app\tests` 195 项通过；`python -m compileall app\backend`、`node --check app\frontend\app.js`、`git diff --check` 通过。 |
+| 真实转换 | 已重启 8765；通过 `/api/convert` 转换 `app/samples/test.pptx`，新 job 为 `df13ec8e76d24fde8e375de79fb01daf`，`render_visual_check.passed=true`。 |
+| 截图检查 | 已查看 `render_visual_check/page_01.png` 和 `page_02.png`，未见明显新增遮挡或乱码。 |
+
+## 2026-05-28 AI 解释重试按钮修复
+| 项目 | 记录 |
+|---|---|
+| 用户反馈 | AI 解释返回错误后，点击“重试”没有反馈。 |
+| 根因 | 失败后 `queueStatusByBlockId` 保留 `error`，重试入队逻辑只判断 key 是否存在，导致直接返回。 |
+| 修复 | 只拦截 `pending/running`；`error` 状态允许重新入队，并在入队时清理旧错误。 |
+| 回归 | 新增前端状态机回归测试，覆盖错误后重试会重新发起 AI 请求并清掉旧错误。 |

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ def check_rendered_pdf(
 
     doc = fitz.open(pdf)
     try:
-        page_numbers = pages or list(range(1, len(doc) + 1))
+        page_numbers = list(range(1, len(doc) + 1)) if pages is None else pages
         checks: list[dict[str, Any]] = []
         warnings: list[str] = []
         for page_number in page_numbers:
@@ -54,6 +56,79 @@ def check_rendered_pdf(
         "pages": checks,
         "screenshot_dir": str(output) if output else None,
     }
+
+
+def check_rendered_preview_images(
+    preview_manifest_path: str | Path,
+    *,
+    pages: list[int] | None = None,
+    formula_regions: dict[int, list[dict[str, Any]]] | None = None,
+    screenshot_dir: str | Path | None = None,
+    scale: float | None = None,
+) -> dict[str, Any]:
+    from PIL import Image
+
+    manifest_path = Path(preview_manifest_path)
+    output = Path(screenshot_dir) if screenshot_dir else None
+    if output:
+        output.mkdir(parents=True, exist_ok=True)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    root = manifest_path.parent
+    wanted = None if pages is None else set(pages)
+    checks: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for page in manifest.get("pages", []) or []:
+        page_number = int(page.get("number") or 0)
+        if page_number <= 0:
+            continue
+        if wanted is not None and page_number not in wanted:
+            continue
+        image_path = root / str(page.get("image") or "")
+        if not image_path.exists():
+            raise FileNotFoundError(f"Guide preview image was not found: {image_path.name}")
+        with Image.open(image_path) as opened:
+            image = opened.convert("RGB")
+            image = _resize_preview_for_check(image, page, scale)
+            if output:
+                target = output / f"page_{page_number:02d}.png"
+                if image_path.suffix.lower() == ".png" and image.size == opened.size:
+                    shutil.copyfile(image_path, target)
+                else:
+                    image.save(target)
+            page_regions = _page_formula_regions(
+                formula_regions or {},
+                page_number,
+                image.size,
+            )
+            page_check = check_rendered_image(
+                image,
+                page_number=page_number,
+                formula_regions=page_regions,
+            )
+        checks.append(page_check)
+        warnings.extend(f"第 {page_number} 页：{warning}" for warning in page_check["warnings"])
+    return {
+        "passed": not warnings,
+        "warnings": warnings,
+        "pages": checks,
+        "screenshot_dir": str(output) if output else None,
+    }
+
+
+def _resize_preview_for_check(image: Any, page: dict[str, Any], scale: float | None) -> Any:
+    if not scale or scale <= 0:
+        return image
+    width_pt = float(page.get("width_pt") or 0)
+    height_pt = float(page.get("height_pt") or 0)
+    if width_pt <= 0 or height_pt <= 0:
+        return image
+    target_size = (
+        max(1, int(round(width_pt * scale))),
+        max(1, int(round(height_pt * scale))),
+    )
+    if image.size == target_size:
+        return image
+    return image.resize(target_size)
 
 
 def check_rendered_image(

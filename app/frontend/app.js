@@ -1,6 +1,11 @@
 const form = document.querySelector("#uploadForm");
 const input = document.querySelector("#deckInput");
 const button = document.querySelector("#convertButton");
+const statusBlock = document.querySelector(".status-block");
+const statusProgressBar = document.querySelector("#statusProgressBar");
+const statusProgressFill = document.querySelector("#statusProgressFill");
+const statusProgressText = document.querySelector("#statusProgressText");
+const statusProgressPercent = document.querySelector("#statusProgressPercent");
 const statusItems = [...document.querySelectorAll("#statusList li")];
 const warningList = document.querySelector("#warningList");
 const frame = document.querySelector("#previewFrame");
@@ -31,10 +36,22 @@ const PROMPT_PROFILE_LABELS = {
   training: "工作培训版",
   simple: "简单解释版"
 };
+const CONVERT_PROGRESS_STEPS = [
+  { percent: 0, label: "等待上传" },
+  { percent: 12, label: "上传 PPTX" },
+  { percent: 28, label: "解析课件结构" },
+  { percent: 45, label: "生成分析和导读计划" },
+  { percent: 88, label: "整理 PDF 输出" },
+  { percent: 100, label: "转换完成" }
+];
+const EXPLANATION_QUEUE_CONCURRENCY = 2;
+const CONVERT_STATUS_POLL_MS = 700;
 
 let currentJobId = "";
 let currentResult = null;
 let currentKnowledge = null;
+let convertProgressTimers = [];
+let activeConvertProgressKey = "";
 const readerState = {
   pages: [],
   slidesByPage: new Map(),
@@ -44,6 +61,7 @@ const readerState = {
   explanationsByProfileKey: new Map(),
   pageExplanationsByPage: new Map(),
   pageExplanationsByProfileKey: new Map(),
+  latestPdfEdit: null,
   queue: [],
   queueStatusByBlockId: new Map(),
   errorsByBlockId: new Map(),
@@ -54,10 +72,126 @@ const readerState = {
 let selectedBlockIds = readerState.selectedBlockIds;
 
 function setStep(index) {
+  const total = CONVERT_PROGRESS_STEPS.length - 1;
+  const clamped = Math.min(Math.max(index, 0), total);
+  const step = CONVERT_PROGRESS_STEPS[clamped] || CONVERT_PROGRESS_STEPS[0];
+  const isComplete = clamped >= total;
+  setProgress(step.percent, step.label, isComplete ? "done" : clamped > 0 ? "running" : "idle");
+
   statusItems.forEach((item, itemIndex) => {
-    item.classList.toggle("done", itemIndex < index);
-    item.classList.toggle("active", itemIndex === index);
+    item.classList.toggle("done", itemIndex < clamped);
+    item.classList.toggle("active", itemIndex === clamped && !isComplete);
   });
+}
+
+function setProgress(percent, label, state = "running") {
+  const value = Math.min(Math.max(Math.round(percent), 0), 100);
+  if (statusBlock) statusBlock.dataset.state = state;
+  if (statusProgressFill?.style) statusProgressFill.style.width = `${value}%`;
+  if (statusProgressText) statusProgressText.textContent = label;
+  if (statusProgressPercent) statusProgressPercent.textContent = state === "error" ? "失败" : `${value}%`;
+  if (statusProgressBar) statusProgressBar.setAttribute("aria-valuenow", String(value));
+}
+
+function setStepError(message) {
+  stopConvertProgress();
+  setProgress(100, message || "转换失败", "error");
+  statusItems.forEach((item) => {
+    item.classList.remove("done");
+    item.classList.remove("active");
+  });
+}
+
+function startConvertProgress() {
+  stopConvertProgress();
+  activeConvertProgressKey = "";
+  setProgress(8, "准备上传", "running");
+  queueProgressStep(180, () => setProgress(12, "上传 PPTX", "running"));
+  queueProgressStep(420, () => setProgress(28, "解析课件结构", "running"));
+  queueProgressStep(780, () => beginAnalysisProgress());
+}
+
+function beginAnalysisProgress() {
+  const startTime = Date.now();
+  setProgress(45, "生成分析和导读计划", "running");
+  const timer = window.setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    const eased = 45 + Math.log1p(elapsed / 900) * 10.5;
+    const percent = Math.min(88, eased);
+    const label = percent >= 78 ? "整理 PDF 输出" : "生成分析和导读计划";
+    setProgress(percent, label, "running");
+  }, 450);
+  convertProgressTimers.push(timer);
+}
+
+function finishConvertProgress() {
+  stopConvertProgress();
+  activeConvertProgressKey = "";
+  setProgress(100, "转换完成", "done");
+}
+
+function stopConvertProgress() {
+  convertProgressTimers.forEach((timer) => window.clearTimeout(timer));
+  convertProgressTimers = [];
+}
+
+function queueProgressStep(delay, callback) {
+  convertProgressTimers.push(window.setTimeout(callback, delay));
+}
+
+function applyConvertStatus(status) {
+  if (status.status === "done") {
+    finishConvertProgress();
+    return status.result || null;
+  }
+  if (status.status === "error") {
+    throw new Error(status.error || status.message || "转换失败");
+  }
+  const percent = Number(status.percent || 0);
+  const nextPercent = Number(status.next_percent || Math.min(95, percent + 8));
+  const message = status.message || "转换中";
+  const key = `${status.stage || "running"}:${Math.round(percent)}:${Math.round(nextPercent)}:${message}`;
+  if (key !== activeConvertProgressKey) {
+    beginBackendProgress(percent, nextPercent, message, key);
+  }
+  return null;
+}
+
+function beginBackendProgress(percent, nextPercent, message, key) {
+  stopConvertProgress();
+  activeConvertProgressKey = key;
+  const base = Math.min(Math.max(Number(percent) || 0, 0), 99);
+  const ceiling = Math.min(Math.max(Number(nextPercent) || base, base), 99);
+  const startTime = Date.now();
+  setProgress(base, message, "running");
+  const timer = window.setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    const eased = base + Math.log1p(elapsed / 900) * Math.max(2, (ceiling - base) * 0.45);
+    setProgress(Math.min(ceiling, eased), message, "running");
+  }, 450);
+  convertProgressTimers.push(timer);
+}
+
+async function pollConvertStatus(jobId, delayMs = CONVERT_STATUS_POLL_MS) {
+  while (true) {
+    const response = await fetch(`/api/convert-status?job_id=${encodeURIComponent(jobId)}`);
+    const status = await response.json();
+    if (!response.ok) {
+      throw new Error(status.error || "转换状态获取失败");
+    }
+    const result = applyConvertStatus(status);
+    if (result) {
+      await loadConvertResult(result);
+      return result;
+    }
+    if (delayMs > 0) {
+      await wait(delayMs);
+    }
+  }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function setWarnings(warnings) {
@@ -165,6 +299,7 @@ function resetAIState() {
   readerState.explanationsByProfileKey = new Map();
   readerState.pageExplanationsByPage = new Map();
   readerState.pageExplanationsByProfileKey = new Map();
+  readerState.latestPdfEdit = null;
   readerState.queue = [];
   readerState.queueStatusByBlockId = new Map();
   readerState.errorsByBlockId = new Map();
@@ -344,29 +479,51 @@ function renderExplanationPanel(page) {
     card.className = "explanation-card page-explanation-card";
     const cardHeader = document.createElement("div");
     cardHeader.className = "explanation-card-header";
+    const cardHeading = document.createElement("div");
+    cardHeading.className = "explanation-card-heading";
     const blockTitle = document.createElement("h4");
     blockTitle.textContent = "整页解释";
     const source = document.createElement("span");
     source.textContent = `第 ${slide.number} 页`;
-    cardHeader.append(blockTitle, source);
+    cardHeading.append(blockTitle, source);
+    cardHeader.appendChild(cardHeading);
     card.appendChild(cardHeader);
     appendExplanationContent(card, pageExplanation);
     appendPageProfileActions(card, slide.number);
     explanationPanel.appendChild(card);
   }
 
-  (slide.blocks || []).forEach((block) => {
+  (slide.blocks || []).forEach((block, index) => {
+    const isSelected = readerState.selectedBlockIds.has(block.id);
     const card = document.createElement("article");
-    card.className = `explanation-card ${readerState.activeBlockId === block.id ? "active" : ""}`;
+    card.className = [
+      "explanation-card",
+      isSelected ? "selected" : "",
+      readerState.activeBlockId === block.id ? "active" : ""
+    ].filter(Boolean).join(" ");
     card.dataset.focusBlock = block.id;
+    setStyleProperty(card, "--block-color", blockColor(index));
 
     const cardHeader = document.createElement("div");
     cardHeader.className = "explanation-card-header";
+    const cardHeading = document.createElement("div");
+    cardHeading.className = "explanation-card-heading";
     const blockTitle = document.createElement("h4");
     blockTitle.textContent = block.title || block.id;
     const source = document.createElement("span");
     source.textContent = `第 ${slide.number} 页 · ${block.id}`;
-    cardHeader.append(blockTitle, source);
+    cardHeading.append(blockTitle, source);
+    const selectLabel = document.createElement("label");
+    selectLabel.className = "card-select-control";
+    const selectInput = document.createElement("input");
+    selectInput.type = "checkbox";
+    selectInput.dataset.panelSelectBlock = block.id;
+    selectInput.checked = isSelected;
+    selectInput.setAttribute("aria-label", `选择 ${block.title || block.id} 进入 AI PDF`);
+    const selectText = document.createElement("span");
+    selectText.textContent = "入 AI PDF";
+    selectLabel.append(selectInput, selectText);
+    cardHeader.append(cardHeading, selectLabel);
     card.appendChild(cardHeader);
 
     const explanation = getBlockExplanation(block.id);
@@ -645,7 +802,7 @@ function updateSelectedSummary() {
   selectedSummary.textContent = count ? `已选择 ${count} 个知识块` : "尚未选择知识块";
   composeButton.disabled = !count || !hasApiKey();
   exportAIButton.disabled =
-    !currentJobId || (!readerState.explanationsByBlockId.size && !readerState.pageExplanationsByPage.size);
+    !currentJobId || !hasApiKey() || !collectExportExplanations().length;
 }
 
 function hasApiKey() {
@@ -672,9 +829,13 @@ function enqueueBlockExplanation(blockId, profile = activePromptProfile()) {
     renderReader();
     return;
   }
-  if (readerState.queue.some((item) => item.blockId === blockId && item.profile === profile)) return;
+  const statusKey = profileKey(blockId, profile);
+  const status = readerState.queueStatusByBlockId.get(statusKey);
+  if (status === "pending" || status === "running") return;
   promptProfileSelect.value = profile;
-  readerState.queueStatusByBlockId.set(profileKey(blockId, profile), "pending");
+  readerState.errorsByBlockId.delete(statusKey);
+  readerState.errorsByBlockId.delete(blockId);
+  readerState.queueStatusByBlockId.set(statusKey, "pending");
   readerState.queue.push({ blockId, wholePage: false, profile });
   renderReader();
   runExplanationQueue();
@@ -697,20 +858,25 @@ async function runExplanationQueue() {
   if (readerState.running) return;
   readerState.running = true;
   try {
-    while (readerState.queue.length > 0) {
-      const item = readerState.queue.shift();
-      const statusKey = profileKey(item.blockId, item.profile);
-      readerState.queueStatusByBlockId.set(statusKey, "running");
-      renderReader();
-      try {
-        await explainSingleBlock(item.blockId, item);
-        readerState.queueStatusByBlockId.delete(statusKey);
-      } catch (error) {
-        readerState.queueStatusByBlockId.set(statusKey, "error");
-        readerState.errorsByBlockId.set(statusKey, error.message);
+    const workerCount = Math.min(EXPLANATION_QUEUE_CONCURRENCY, readerState.queue.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (readerState.queue.length > 0) {
+        const item = readerState.queue.shift();
+        if (!item) continue;
+        const statusKey = profileKey(item.blockId, item.profile);
+        readerState.queueStatusByBlockId.set(statusKey, "running");
+        renderReader();
+        try {
+          await explainSingleBlock(item.blockId, item);
+          readerState.queueStatusByBlockId.delete(statusKey);
+        } catch (error) {
+          readerState.queueStatusByBlockId.set(statusKey, "error");
+          readerState.errorsByBlockId.set(statusKey, error.message);
+        }
+        renderReader();
       }
-      renderReader();
-    }
+    });
+    await Promise.all(workers);
   } finally {
     readerState.running = false;
     renderReader();
@@ -745,6 +911,12 @@ async function explainSingleBlock(blockId, options = {}) {
 async function explainWholePage(pageNumber, profile = activePromptProfile()) {
   if (!currentJobId) {
     throw new Error("请先完成转换");
+  }
+  if (hasPageExplanation(pageNumber, profile)) {
+    const explanation = readerState.pageExplanationsByProfileKey.get(pageProfileKey(pageNumber, profile));
+    renderAIResult({ status: "ok", explanation });
+    renderReader();
+    return;
   }
   const config = selectedApiConfig(profile);
   const response = await fetch("/api/ai/explain-page", {
@@ -820,15 +992,86 @@ function renderAIResult(result, blockId = "") {
 }
 
 function collectExportExplanations() {
-  const blockExplanations = [...readerState.explanationsByBlockId.entries()].map(([blockId, explanation]) => ({
-    block_id: blockId,
-    explanation
-  }));
-  const pageExplanations = [...readerState.pageExplanationsByPage.entries()].map(([pageNumber, explanation]) => ({
-    page_number: Number(pageNumber),
-    explanation
-  }));
-  return [...blockExplanations, ...pageExplanations];
+  return [...readerState.selectedBlockIds]
+    .map((blockId) => {
+      const explanation = getBlockExplanation(blockId);
+      return explanation ? { block_id: blockId, explanation } : null;
+    })
+    .filter(Boolean);
+}
+
+async function editExplanationsForPdf(explanations) {
+  const config = selectedApiConfig();
+  const requestKey = pdfEditRequestKey(explanations, config);
+  if (readerState.latestPdfEdit?.request_key === requestKey) {
+    return readerState.latestPdfEdit.export_explanations || [];
+  }
+  const response = await fetch("/api/ai/edit-pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      job_id: currentJobId,
+      explanations,
+      ...config
+    })
+  });
+  const result = await response.json();
+  if (!response.ok || result.status !== "ok") {
+    throw new Error(result.error || "AI PDF 整理失败");
+  }
+  result.request_key = requestKey;
+  readerState.latestPdfEdit = result;
+  return result.export_explanations || [];
+}
+
+function pdfEditRequestKey(explanations, config) {
+  return JSON.stringify({
+    job_id: currentJobId,
+    model: config.model || "",
+    base_url: config.base_url || "",
+    prompt_profile: config.prompt_profile || "",
+    explanations: (explanations || []).map((item) => ({
+      target: exportItemKey(item),
+      prompt_profile: item?.explanation?.prompt_profile || item?.prompt_profile || "",
+      text: asText(
+        item?.explanation?.pdf_snippet ||
+        item?.explanation?.short_explanation ||
+        item?.explanation?.detail
+      ),
+      sections: asSections(item?.explanation?.sections),
+      source_refs: item?.explanation?.source_refs || []
+    }))
+  });
+}
+
+function exportItemKey(item) {
+  if (item?.page_number) return `page:${Number(item.page_number)}`;
+  return `block:${item?.block_id || ""}`;
+}
+
+function hasPdfExplanationText(item) {
+  const explanation = item?.explanation || {};
+  return Boolean(
+    asText(explanation.pdf_snippet || explanation.short_explanation || explanation.detail).trim() ||
+    asList(explanation.key_points).length ||
+    asSections(explanation.sections).length
+  );
+}
+
+function mergeEditedExportExplanations(selectedExplanations, editedExplanations) {
+  const editedByKey = new Map(
+    (editedExplanations || [])
+      .filter((item) => item && typeof item === "object")
+      .map((item) => [exportItemKey(item), item])
+  );
+  return selectedExplanations.map((selected) => {
+    const edited = editedByKey.get(exportItemKey(selected));
+    const source = hasPdfExplanationText(edited) ? edited : selected;
+    return {
+      ...source,
+      include_in_pdf: true
+    };
+  });
 }
 
 async function exportAIGuidePdf() {
@@ -837,18 +1080,24 @@ async function exportAIGuidePdf() {
   }
   const explanations = collectExportExplanations();
   if (!explanations.length) {
-    throw new Error("请先生成至少一个 AI 解释");
+    throw new Error("请先选择已生成 AI 解释的块");
+  }
+  if (!hasApiKey()) {
+    throw new Error("请先填写 API Key，让 AI 整理进入 PDF 的短稿");
   }
   exportAIButton.disabled = true;
   const originalText = exportAIButton.textContent;
-  exportAIButton.textContent = "生成中";
+  exportAIButton.textContent = "整理中";
   try {
+    const editedExplanations = await editExplanationsForPdf(explanations);
+    const exportExplanations = mergeEditedExportExplanations(explanations, editedExplanations);
+    exportAIButton.textContent = "生成中";
     const response = await fetch("/api/ai/export-guide", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         job_id: currentJobId,
-        explanations
+        explanations: exportExplanations
       })
     });
     const result = await response.json();
@@ -860,7 +1109,7 @@ async function exportAIGuidePdf() {
       ai_guide_pdf_url: result.ai_guide_pdf_url
     };
     setDownloads(currentResult);
-    setReaderMessage("AI PDF 已生成，可在顶部下载");
+    setReaderMessage(`AI 已整理 ${exportExplanations.length} 条重点补充，PDF 已生成`);
   } finally {
     exportAIButton.textContent = originalText;
     updateSelectedSummary();
@@ -901,26 +1150,35 @@ function asText(value) {
   return String(value);
 }
 
-function toggleBlockSelection(blockId) {
+function setBlockSelection(blockId, selected, scrollToPanel = true) {
   if (!blockId) return;
-  if (readerState.selectedBlockIds.has(blockId)) {
-    readerState.selectedBlockIds.delete(blockId);
-  } else {
+  if (selected) {
     readerState.selectedBlockIds.add(blockId);
+  } else {
+    readerState.selectedBlockIds.delete(blockId);
   }
   readerState.activeBlockId = blockId;
   readerState.hitCandidates = null;
   renderReader();
+  if (scrollToPanel) scrollExplanationCard(blockId);
+}
+
+function toggleBlockSelection(blockId) {
+  setBlockSelection(blockId, !readerState.selectedBlockIds.has(blockId));
+}
+
+function scrollExplanationCard(blockId) {
+  const card = explanationPanel?.querySelector?.(`[data-focus-block="${blockId}"]`);
+  if (card?.scrollIntoView) {
+    card.scrollIntoView({ block: "nearest" });
+  }
 }
 
 function focusBlock(blockId) {
   if (!blockId) return;
   readerState.activeBlockId = blockId;
   renderReader();
-  const card = explanationPanel?.querySelector?.(`[data-focus-block="${blockId}"]`);
-  if (card?.scrollIntoView) {
-    card.scrollIntoView({ block: "nearest" });
-  }
+  scrollExplanationCard(blockId);
 }
 
 pageTabs?.addEventListener("click", (event) => {
@@ -966,13 +1224,7 @@ blockList.addEventListener("change", (event) => {
   if (!(checkbox instanceof HTMLInputElement) || checkbox.type !== "checkbox") return;
   const blockId = checkbox.dataset.blockId;
   if (!blockId) return;
-  if (checkbox.checked) {
-    readerState.selectedBlockIds.add(blockId);
-  } else {
-    readerState.selectedBlockIds.delete(blockId);
-  }
-  readerState.activeBlockId = blockId;
-  renderReader();
+  setBlockSelection(blockId, checkbox.checked);
 });
 
 blockList.addEventListener("click", (event) => {
@@ -991,6 +1243,14 @@ blockList.addEventListener("click", (event) => {
   if (focusTarget) {
     focusBlock(focusTarget);
   }
+});
+
+explanationPanel?.addEventListener("change", (event) => {
+  const checkbox = event.target;
+  if (!(checkbox instanceof HTMLInputElement) || checkbox.type !== "checkbox") return;
+  const blockId = checkbox.dataset.panelSelectBlock;
+  if (!blockId) return;
+  setBlockSelection(blockId, checkbox.checked);
 });
 
 explanationPanel?.addEventListener("click", (event) => {
@@ -1056,13 +1316,22 @@ clearApiKeyButton.addEventListener("click", () => {
 
 apiKeyInput.addEventListener("input", renderReader);
 
+async function loadConvertResult(result) {
+  currentJobId = result.job_id;
+  currentResult = result;
+  setWarnings(result.warnings || []);
+  setDownloads(result);
+  await loadReaderAssets(result);
+  if (frame && result.guide_pdf_url) frame.src = result.guide_pdf_url;
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!input.files.length) return;
 
   button.disabled = true;
   button.textContent = "转换中";
-  setStep(1);
+  startConvertProgress();
   setWarnings([]);
   frame?.removeAttribute("src");
   downloadLinks.innerHTML = "";
@@ -1076,24 +1345,26 @@ form.addEventListener("submit", async (event) => {
   data.append("deck", input.files[0]);
 
   try {
-    setStep(2);
     const response = await fetch("/api/convert", {
       method: "POST",
       body: data
     });
     const result = await response.json();
-    if (!response.ok || result.status !== "ok") {
+    if (!response.ok) {
       throw new Error(result.error || "转换失败");
     }
-    currentJobId = result.job_id;
-    currentResult = result;
-    setStep(statusItems.length);
-    setWarnings(result.warnings || []);
-    setDownloads(result);
-    await loadReaderAssets(result);
-    if (frame && result.guide_pdf_url) frame.src = result.guide_pdf_url;
+    if (result.status === "accepted") {
+      currentJobId = result.job_id;
+      await pollConvertStatus(result.job_id);
+      return;
+    }
+    if (result.status !== "ok") {
+      throw new Error(result.error || "转换失败");
+    }
+    finishConvertProgress();
+    await loadConvertResult(result);
   } catch (error) {
-    setStep(0);
+    setStepError(error.message);
     resultTitle.textContent = "转换失败";
     readerHint.textContent = error.message;
     if (warningList) {
@@ -1137,6 +1408,7 @@ if (document.addEventListener && document.dispatchEvent) {
 }
 
 updateSelectedSummary();
+setStep(0);
 
 function dispatchReaderEvent(name, detail) {
   if (typeof CustomEvent === "function") {

@@ -19,6 +19,7 @@
 | System role | System validates sources, enforces length limits, scores safe positions, renders PDF, and runs visual checks. |
 | Output target | Only `ai_guide.pdf` changes. `base.pdf` remains original comparison output; `guide.pdf` remains the stable learning baseline. |
 | Failure behavior | Invalid schema, invalid source refs, over-limit text, or unsafe placement must fail visibly or fall back to extension pages; do not silently stuff text into the page. |
+| Frontend display | Show only selected/exported state, compact snippet, and layout status. Keep reasons in manifest/debug data by default. |
 | Non-goals | Do not export full AI chat text. Do not let the model invent coordinates. Do not replace `guide.pdf`. Do not show internal `source_refs` in user-facing PDF text. |
 
 ## End-to-End Flow
@@ -51,8 +52,8 @@ flowchart TD
 | `priority` | int | 1 is highest; used when page space is limited. |
 | `pdf_title` | string | Short user-facing title, no internal refs. |
 | `pdf_snippet` | string | 40-120 Chinese chars preferred; hard max enforced by backend. |
-| `importance_reason` | string | Why this snippet helps review. |
-| `drop_reason` | string | Required when `include_in_pdf=false`. |
+| `importance_reason` | string | Why this snippet helps review; internal/debug display only. |
+| `drop_reason` | string | Required when `include_in_pdf=false`; internal/debug display only. |
 | `layout_intent` | string | `blank_note`, `margin_note`, `callout`, `extension_panel`, or `drop`. |
 | `anchor_block_id` | string | Closest knowledge block for placement. |
 | `source_refs` | list | Internal audit only; never rendered as user text. |
@@ -127,7 +128,7 @@ flowchart TD
 
 - [ ] Add selected-card state separate from selected knowledge-block state.
 - [ ] Add an “AI 整理进 PDF” action that sends selected cards to the backend editor.
-- [ ] Show AI decisions on each card: include/drop, short snippet, reason, and layout intent.
+- [ ] Show only AI decisions users need: include/drop state, compact snippet preview, and layout status. Do not show reasons by default.
 - [ ] Let the user override include/drop before final export.
 - [ ] Keep full explanation visible in Web, but export only the edited snippets.
 - [ ] Run `node --check app/frontend/app.js` and the focused frontend test.
@@ -165,6 +166,15 @@ flowchart TD
 | M3 Page blank notes | Safe snippets enter blank page areas. | Screenshot gate proves no original content is covered. |
 | M4 Agent UX | User sees AI decision, can override, then exports. | Workflow feels like an editing agent, not a raw chat dump. |
 
+## 2026-05-25 MVP Execution Status
+
+| Item | Status | Notes |
+|---|---|---|
+| M1 Editor only | Done | `ai_pdf_editor.py` returns include/drop decisions, compact snippets, layout intent, and export payload. |
+| M2 Export extension-safe | Done | `ai_pdf_exporter.py` exports only `pdf_snippet`; dropped decisions are recorded in manifest. |
+| M4 Agent UX, simplified | Done | Frontend runs AI edit before export and does not show reasons by default. |
+| M3 Page blank notes | Done for first pass | Safe `blank_note` / `margin_note` / `callout` snippets can be written into source-page blank rectangles; screenshot gate automation remains pending. |
+
 ## Self-Review
 
 | Check | Result |
@@ -173,4 +183,13 @@ flowchart TD
 | Agent identity | AI makes editorial decisions and layout suggestions, while deterministic code owns final placement. |
 | Information density | Per-card and per-page budgets prevent PDF text flooding. |
 | Safety | API key stays out of export; source refs stay internal; invalid AI output fails loudly. |
-| Visual risk | Page integration starts after extension-safe path and requires screenshot gates. |
+| Visual risk | Geometry overlap is guarded; screenshot-level clipping and ugliness still need an automated gate. |
+
+## 2026-05-25 Inline Placement Update
+
+| Item | Status | Notes |
+|---|---|---|
+| M3 Page blank notes | Done for first pass | `ai_pdf_exporter.py` now places `blank_note` / `margin_note` / `callout` snippets into deterministic free rectangles when they fit. |
+| Extension fallback | Done | If a requested inline snippet has no safe rectangle, it is rendered as an `extension_panel` after the source page. |
+| Manifest | Done | Inline placements record `source_page`, `layout_modes`, and note rectangle coordinates; dropped decisions remain in `dropped`. |
+| Remaining gate | Pending | The current gate prevents geometry overlap, but does not yet fail export on screenshot-level clipping or visual ugliness. |

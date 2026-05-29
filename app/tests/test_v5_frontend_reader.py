@@ -129,7 +129,375 @@ class V5FrontendReaderTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_export_ai_button_posts_existing_explanations(self):
+    def test_export_collects_only_selected_block_explanations(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.checked = false;
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector() {{ return new FakeElement(); }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            elements.set("#apiKeyInput", new HTMLInputElement("input"));
+            elements.set("#exportAIButton", new HTMLButtonElement("button"));
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              fetch: async () => ({{ ok: true, json: async () => ({{}}) }}),
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              promptProfileSelect.value = "study";
+              readerState.selectedBlockIds.add("s1_b2");
+              readerState.explanationsByBlockId.set("s1_b1", {{
+                short_explanation: "未选中解释",
+                source_refs: []
+              }});
+              readerState.explanationsByBlockId.set("s1_b2", {{
+                short_explanation: "已选中解释",
+                source_refs: []
+              }});
+              readerState.pageExplanationsByPage.set(1, {{
+                short_explanation: "整页解释不应进入选块导出",
+                source_refs: []
+              }});
+              const exported = collectExportExplanations();
+              if (exported.length !== 1 || exported[0].block_id !== "s1_b2") {{
+                throw new Error(JSON.stringify(exported));
+              }}
+              `,
+              context
+            );
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_right_panel_can_select_block_and_selection_scrolls_to_card(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            let scrollCalls = 0;
+            const scrollTarget = {{ scrollIntoView() {{ scrollCalls += 1; }} }};
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.checked = false;
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector(selector) {{
+                if (selector === `[data-focus-block="s1_b1"]`) return scrollTarget;
+                return new FakeElement();
+              }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              fetch: async () => ({{ ok: true, json: async () => ({{}}) }}),
+              scrollCalls: () => scrollCalls,
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              promptProfileSelect.value = "study";
+              readerState.currentPage = 1;
+              readerState.pages = [{{ number: 1, image_url: "/page1.png" }}];
+              readerState.slidesByPage.set(1, {{
+                number: 1,
+                blocks: [
+                  {{ id: "s1_b1", title: "块 1", summary: "摘要", display_bbox: {{ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }}, source_refs: [] }}
+                ]
+              }});
+              renderExplanationPanel({{ number: 1 }});
+              function collectPanelSelectors(node, acc = []) {{
+                if (node.dataset && node.dataset.panelSelectBlock) acc.push(node.dataset.panelSelectBlock);
+                (node.children || []).forEach((child) => collectPanelSelectors(child, acc));
+                return acc;
+              }}
+              const selectors = collectPanelSelectors(explanationPanel);
+              if (selectors.join("|") !== "s1_b1") throw new Error(selectors.join("|"));
+              toggleBlockSelection("s1_b1");
+              if (scrollCalls() !== 1) throw new Error(String(scrollCalls()));
+              `,
+              context
+            );
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_export_keeps_selected_explanations_when_pdf_editor_drops_them(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.checked = false;
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector() {{ return new FakeElement(); }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            elements.set("#apiKeyInput", new HTMLInputElement("input"));
+            elements.set("#exportAIButton", new HTMLButtonElement("button"));
+            const posts = [];
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              posts,
+              fetch: async (url, options) => {{
+                posts.push({{ url, body: JSON.parse(options.body) }});
+                if (url === "/api/ai/edit-pdf") {{
+                  return {{
+                    ok: true,
+                    json: async () => ({{
+                      status: "ok",
+                      export_explanations: [
+                        {{
+                          block_id: "s1_b1",
+                          include_in_pdf: false,
+                          explanation: {{
+                            short_explanation: "",
+                            source_refs: [{{ kind: "slide_text", slide: 1, object_id: "shape1" }}]
+                          }}
+                        }}
+                      ]
+                    }})
+                  }};
+                }}
+                if (url === "/api/ai/export-guide") {{
+                  return {{
+                    ok: true,
+                    json: async () => ({{
+                      status: "ok",
+                      ai_guide_pdf_url: "/outputs/jobx/ai_guide.pdf",
+                      ai_guide_manifest_url: "/outputs/jobx/ai_guide_manifest.json"
+                    }})
+                  }};
+                }}
+                throw new Error("unexpected call: " + url);
+              }},
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              currentJobId = "jobx";
+              apiKeyInput.value = "sk-test";
+              promptProfileSelect.value = "study";
+              readerState.selectedBlockIds.add("s1_b1");
+              readerState.explanationsByBlockId.set("s1_b1", {{
+                short_explanation: "完整讲解",
+                source_refs: [{{ kind: "slide_text", slide: 1, object_id: "shape1" }}]
+              }});
+              globalThis.__exportAIGuidePdf = exportAIGuidePdf;
+              globalThis.__posts = posts;
+              `,
+              context
+            );
+            (async () => {{
+              await context.__exportAIGuidePdf();
+              if (context.__posts.length !== 2) throw new Error(JSON.stringify(context.__posts));
+              if (context.__posts[0].url !== "/api/ai/edit-pdf") throw new Error(context.__posts[0].url);
+              if (context.__posts[1].url !== "/api/ai/export-guide") throw new Error(context.__posts[1].url);
+              const exported = context.__posts[1].body.explanations;
+              if (exported.length !== 1 || exported[0].block_id !== "s1_b1") {{
+                throw new Error(JSON.stringify(exported));
+              }}
+              if (exported[0].include_in_pdf !== true) {{
+                throw new Error(JSON.stringify(exported[0]));
+              }}
+              if (exported[0].explanation.short_explanation !== "完整讲解") {{
+                throw new Error(JSON.stringify(exported[0]));
+              }}
+            }})().catch((error) => {{
+              console.error(error.stack || error.message);
+              process.exitCode = 1;
+            }});
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_export_ai_button_requires_api_key_for_pdf_editor(self):
         script = textwrap.dedent(
             f"""
             const fs = require("fs");
@@ -181,7 +549,7 @@ class V5FrontendReaderTest(unittest.TestCase):
             elements.set("#clearApiKeyButton", new HTMLButtonElement("button"));
             elements.set("#sendPageButton", new HTMLButtonElement("button"));
 
-            let postedBody = null;
+            let fetchCalled = false;
             const document = {{
               querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
               querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
@@ -197,16 +565,8 @@ class V5FrontendReaderTest(unittest.TestCase):
               HTMLButtonElement,
               FormData: class FormData {{}},
               fetch: async (url, options) => {{
-                if (url !== "/api/ai/export-guide") throw new Error(url);
-                postedBody = JSON.parse(options.body);
-                return {{
-                  ok: true,
-                  json: async () => ({{
-                    status: "ok",
-                    ai_guide_pdf_url: "/outputs/jobx/ai_guide.pdf",
-                    ai_guide_manifest_url: "/outputs/jobx/ai_guide_manifest.json"
-                  }})
-                }};
+                fetchCalled = true;
+                throw new Error(url);
               }},
               console,
               URL
@@ -216,6 +576,7 @@ class V5FrontendReaderTest(unittest.TestCase):
               code + `
               currentJobId = "jobx";
               currentResult = {{ base_pdf_url: "/base.pdf", guide_pdf_url: "/guide.pdf", compare_url: "/compare.html" }};
+              readerState.selectedBlockIds.add("s1_b1");
               readerState.explanationsByBlockId.set("s1_b1", {{
                 short_explanation: "Short",
                 source_refs: [{{ kind: "slide_text", slide: 1, object_id: "shape1" }}]
@@ -225,20 +586,181 @@ class V5FrontendReaderTest(unittest.TestCase):
                 source_refs: [{{ kind: "slide_text", slide: 1, object_id: "shape1" }}]
               }});
               globalThis.__exportAIGuidePdf = exportAIGuidePdf;
-              globalThis.__downloadLinks = downloadLinks;
+              `,
+              context
+            );
+            (async () => {{
+              try {{
+                await context.__exportAIGuidePdf();
+              }} catch (error) {{
+                if (!error.message.includes("请先填写 API Key")) throw error;
+                if (fetchCalled) throw new Error("fetch should not be called without API key");
+                return;
+              }}
+              throw new Error("expected API key error");
+            }})().catch((error) => {{
+              console.error(error.stack || error.message);
+              process.exitCode = 1;
+            }});
+            """
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as file:
+            file.write(script)
+            script_path = file.name
+        try:
+            result = subprocess.run(
+                ["node", script_path],
+                cwd=ROOT_DIR,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_export_ai_button_asks_agent_to_edit_before_export(self):
+        script = textwrap.dedent(
+            f"""
+            const fs = require("fs");
+            const vm = require("vm");
+            const code = fs.readFileSync({str(ROOT_DIR / "app" / "frontend" / "app.js")!r}, "utf8");
+
+            class FakeElement {{
+              constructor(tag = "div") {{
+                this.tagName = tag.toUpperCase();
+                this.children = [];
+                this.dataset = {{}};
+                this.style = {{}};
+                this.className = "";
+                this.classList = {{ toggle() {{}}, add() {{}}, remove() {{}} }};
+                this.value = "";
+                this.files = [];
+                this.disabled = false;
+                this.hidden = false;
+                this.href = "";
+                this.textContent = "";
+                this.innerHTML = "";
+              }}
+              appendChild(child) {{ this.children.push(child); return child; }}
+              append(...children) {{ this.children.push(...children); }}
+              addEventListener() {{}}
+              removeAttribute(name) {{ delete this[name]; }}
+              setAttribute(name, value) {{ this[name] = value; }}
+              focus() {{}}
+              querySelector() {{ return new FakeElement(); }}
+              scrollIntoView() {{}}
+            }}
+            class HTMLInputElement extends FakeElement {{}}
+            class HTMLButtonElement extends FakeElement {{}}
+
+            const selectors = [
+              "#uploadForm", "#deckInput", "#convertButton", "#warningList", "#previewFrame",
+              "#resultTitle", "#downloadLinks", "#debugLinks", "#blockList", "#selectedSummary",
+              "#aiOutput", "#apiKeyInput", "#baseUrlInput", "#modelInput", "#composeButton",
+              "#promptProfileSelect", "#includeImagesInput", "#exportAIButton", "#clearApiKeyButton",
+              "#reader", "#pageTabs", "#guidePageStage", "#explanationPanel", "#sendPageButton", "#readerHint"
+            ];
+            const elements = new Map(selectors.map((selector) => [selector, new FakeElement()]));
+            elements.set("#deckInput", new HTMLInputElement("input"));
+            elements.set("#apiKeyInput", new HTMLInputElement("input"));
+            elements.set("#convertButton", new HTMLButtonElement("button"));
+            elements.set("#composeButton", new HTMLButtonElement("button"));
+            elements.set("#exportAIButton", new HTMLButtonElement("button"));
+            elements.set("#clearApiKeyButton", new HTMLButtonElement("button"));
+            elements.set("#sendPageButton", new HTMLButtonElement("button"));
+
+            const posts = [];
+            const document = {{
+              querySelector(selector) {{ return elements.get(selector) || new FakeElement(); }},
+              querySelectorAll() {{ return [new FakeElement("li"), new FakeElement("li")]; }},
+              createElement(tag) {{
+                if (tag === "input") return new HTMLInputElement(tag);
+                if (tag === "button") return new HTMLButtonElement(tag);
+                return new FakeElement(tag);
+              }}
+            }};
+            const context = {{
+              document,
+              HTMLInputElement,
+              HTMLButtonElement,
+              FormData: class FormData {{}},
+              posts,
+              fetch: async (url, options) => {{
+                posts.push({{ url, body: JSON.parse(options.body) }});
+                if (url === "/api/ai/edit-pdf") {{
+                  return {{
+                    ok: true,
+                    json: async () => ({{
+                      status: "ok",
+                      decisions: [
+                        {{
+                          block_id: "s1_b1",
+                          include_in_pdf: true,
+                          pdf_snippet: "短补充",
+                          importance_reason: "不要展示",
+                          layout_intent: "extension_panel"
+                        }}
+                      ],
+                      export_explanations: [
+                        {{
+                          block_id: "s1_b1",
+                          include_in_pdf: true,
+                          explanation: {{
+                            short_explanation: "短补充",
+                            pdf_snippet: "短补充",
+                            source_refs: [{{ kind: "slide_text", slide: 1, object_id: "shape1" }}]
+                          }}
+                        }}
+                      ]
+                    }})
+                  }};
+                }}
+                if (url === "/api/ai/export-guide") {{
+                  return {{
+                    ok: true,
+                    json: async () => ({{
+                      status: "ok",
+                      ai_guide_pdf_url: "/outputs/jobx/ai_guide.pdf",
+                      ai_guide_manifest_url: "/outputs/jobx/ai_guide_manifest.json"
+                    }})
+                  }};
+                }}
+                throw new Error(url);
+              }},
+              console,
+              URL
+            }};
+
+            vm.runInNewContext(
+              code + `
+              currentJobId = "jobx";
+              currentResult = {{ base_pdf_url: "/base.pdf", guide_pdf_url: "/guide.pdf", compare_url: "/compare.html" }};
+              apiKeyInput.value = "sk-test";
+              readerState.selectedBlockIds.add("s1_b1");
+              readerState.explanationsByBlockId.set("s1_b1", {{
+                short_explanation: "完整讲解",
+                detail: "完整长讲解",
+                source_refs: [{{ kind: "slide_text", slide: 1, object_id: "shape1" }}]
+              }});
+              globalThis.__exportAIGuidePdf = exportAIGuidePdf;
+              globalThis.__posts = posts;
+              globalThis.__readerHint = readerHint;
               `,
               context
             );
             (async () => {{
               await context.__exportAIGuidePdf();
-              if (!postedBody || postedBody.job_id !== "jobx") throw new Error(JSON.stringify(postedBody));
-              if (postedBody.api_key) throw new Error("API key leaked");
-              if (postedBody.explanations.length !== 2 || postedBody.explanations[0].block_id !== "s1_b1" || postedBody.explanations[1].page_number !== 1) {{
-                throw new Error(JSON.stringify(postedBody));
+              if (context.__posts.length !== 2) throw new Error(JSON.stringify(context.__posts));
+              if (context.__posts[0].url !== "/api/ai/edit-pdf") throw new Error(context.__posts[0].url);
+              if (context.__posts[1].url !== "/api/ai/export-guide") throw new Error(context.__posts[1].url);
+              if (context.__posts[1].body.api_key) throw new Error("API key leaked to export");
+              if (context.__posts[1].body.explanations[0].explanation.short_explanation !== "短补充") {{
+                throw new Error(JSON.stringify(context.__posts[1].body));
               }}
-              const labels = context.__downloadLinks.children.map((child) => `${{child.textContent}}:${{child.className}}`);
-              if (!labels.join("|").includes("AI 解释版:download-link")) {{
-                throw new Error(labels.join("|"));
+              if (context.__readerHint.textContent.includes("不要展示")) {{
+                throw new Error("reason leaked to main UI");
               }}
             }})().catch((error) => {{
               console.error(error.stack || error.message);
