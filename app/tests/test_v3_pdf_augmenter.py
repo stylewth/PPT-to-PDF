@@ -479,6 +479,7 @@ class V3PdfAugmenterTest(unittest.TestCase):
                         "source_slide": 1,
                         "size": {"width": 1000, "height": 1000},
                         "strategy": "keep_native",
+                        "inline_markers": [{"order": 1, "label": "1"}],
                         "object_boxes": [
                             {
                                 "id": "formula",
@@ -511,6 +512,7 @@ class V3PdfAugmenterTest(unittest.TestCase):
                         "source_slide": 1,
                         "size": {"width": 1000, "height": 1000},
                         "strategy": "keep_native",
+                        "inline_markers": [{"order": 1, "label": "1"}],
                         "object_boxes": [
                             {
                                 "id": "formula",
@@ -543,6 +545,7 @@ class V3PdfAugmenterTest(unittest.TestCase):
                         "source_slide": 1,
                         "size": {"width": 1000, "height": 1000},
                         "strategy": "keep_native",
+                        "inline_markers": [{"order": 1, "label": "1"}],
                         "object_boxes": [
                             {
                                 "id": "formula",

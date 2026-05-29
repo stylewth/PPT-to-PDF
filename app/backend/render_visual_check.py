@@ -281,49 +281,88 @@ def _formula_edge_warning(pixels: Any, box: dict[str, int]) -> str | None:
 
 def _dense_ink_warnings(image: Any) -> list[str]:
     width, height = image.size
-    pixels = image.load()
     tile = 28
-    warnings: list[str] = []
+    pixels = list(image.getdata())
+    size = len(pixels)
+
+    ink_mask = bytearray(size)
+    ink_cls = bytearray(size)
+    bg_mask = bytearray(size)
+
+    for i, (r, g, b) in enumerate(pixels):
+        if r < 80 and g < 80 and b < 80:
+            ink_mask[i] = 1
+            ink_cls[i] = 1
+        elif b > 120 and r < 120 and g < 160:
+            ink_mask[i] = 1
+            ink_cls[i] = 2
+        elif r > 140 and g < 90 and b < 90:
+            ink_mask[i] = 1
+            ink_cls[i] = 3
+        if (r > 215 and g > 175 and b < 150) or (g > 210 and r < 230 and b < 230) or (g > 210 and b > 210 and r < 245):
+            bg_mask[i] = 1
+
+    h_diff = bytearray(size)
+    v_diff = bytearray(size)
+    for y in range(height):
+        row_start = y * width
+        for x in range(width - 1):
+            i = row_start + x
+            if ink_mask[i] != ink_mask[i + 1] or (ink_mask[i] and ink_cls[i] != ink_cls[i + 1]):
+                h_diff[i] = 1
+    for y in range(height - 1):
+        row_start = y * width
+        next_row = row_start + width
+        for x in range(width):
+            i = row_start + x
+            if ink_mask[i] != ink_mask[i + width] or (ink_mask[i] and ink_cls[i] != ink_cls[i + width]):
+                v_diff[i] = 1
+
     for y0 in range(int(height * 0.12), height - tile + 1, tile):
         for x0 in range(0, width - tile + 1, tile):
-            ink = 0
-            colored = 0
-            classes: set[str] = set()
-            for y in range(y0, y0 + tile):
-                for x in range(x0, x0 + tile):
-                    value = pixels[x, y]
-                    if _is_ink(value):
-                        ink += 1
-                        classes.add(_ink_class(value))
-                    if _is_formula_background(value):
-                        colored += 1
+            ink_count = 0
+            colored_count = 0
+            classes: set[int] = set()
+            transitions = 0
+            for dy in range(tile):
+                row_start = (y0 + dy) * width + x0
+                row_end = row_start + tile
+                ink_count += sum(ink_mask[row_start:row_end])
+                colored_count += sum(bg_mask[row_start:row_end])
+                transitions += sum(h_diff[row_start:row_end - 1])
+                for dx in range(tile):
+                    cls = ink_cls[row_start + dx]
+                    if cls:
+                        classes.add(cls)
+            for dy in range(tile - 1):
+                row_start = (y0 + dy) * width + x0
+                transitions += sum(v_diff[row_start:row_start + tile])
+
             area = tile * tile
-            transitions = _ink_transitions(pixels, x0, y0, tile)
-            if ink / area > 0.58 and colored / area < 0.20 and len(classes) >= 2 and transitions / area > 0.35:
-                warnings.append("局部墨迹密度异常，疑似文字/公式叠压")
-                return warnings
-    return warnings
+            if ink_count / area > 0.58 and colored_count / area < 0.20 and len(classes) >= 2 and transitions / area > 0.35:
+                return ["局部墨迹密度异常，疑似文字/公式叠压"]
+    return []
 
 
 def _formula_ink_crowding_warning(image: Any) -> str | None:
     width, height = image.size
     if width < 60 or height < 24:
         return None
-    pixels = image.load()
+    pixels = list(image.getdata())
     row_ink = [0] * height
     col_ink = [0] * width
     ink = 0
     formula_background = 0
-    for y in range(height):
-        for x in range(width):
-            value = pixels[x, y]
-            if _is_formula_background(value):
-                formula_background += 1
-            if not _is_ink(value):
-                continue
-            ink += 1
-            row_ink[y] += 1
-            col_ink[x] += 1
+    for i, (r, g, b) in enumerate(pixels):
+        y = i // width
+        x = i % width
+        if (r > 215 and g > 175 and b < 150) or (g > 210 and r < 230 and b < 230) or (g > 210 and b > 210 and r < 245):
+            formula_background += 1
+        if not ((r < 80 and g < 80 and b < 80) or (b > 120 and r < 120 and g < 160) or (r > 140 and g < 90 and b < 90)):
+            continue
+        ink += 1
+        row_ink[y] += 1
+        col_ink[x] += 1
     area = width * height
     ink_ratio = ink / area
     if ink_ratio <= 0.12:
@@ -342,33 +381,6 @@ def _formula_ink_crowding_warning(image: Any) -> str | None:
     if max_row_ratio > 0.32 and dense_rows >= max(6, height // 8) and dense_columns >= 2:
         return "公式墨迹拥挤，疑似公式被压缩或叠压"
     return None
-
-
-def _ink_transitions(pixels: Any, x0: int, y0: int, tile: int) -> int:
-    transitions = 0
-    for y in range(y0, y0 + tile):
-        for x in range(x0, x0 + tile - 1):
-            first = pixels[x, y]
-            second = pixels[x + 1, y]
-            if _ink_boundary(first, second):
-                transitions += 1
-    for y in range(y0, y0 + tile - 1):
-        for x in range(x0, x0 + tile):
-            first = pixels[x, y]
-            second = pixels[x, y + 1]
-            if _ink_boundary(first, second):
-                transitions += 1
-    return transitions
-
-
-def _ink_boundary(first: tuple[int, int, int], second: tuple[int, int, int]) -> bool:
-    first_ink = _is_ink(first)
-    second_ink = _is_ink(second)
-    if first_ink != second_ink:
-        return True
-    if not first_ink:
-        return False
-    return _ink_class(first) != _ink_class(second)
 
 
 def _is_formula_background(rgb: tuple[int, int, int]) -> bool:

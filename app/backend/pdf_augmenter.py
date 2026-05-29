@@ -4,10 +4,11 @@ import json
 import posixpath
 import re
 import shutil
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -21,6 +22,9 @@ R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 RELATION_LINE_CLEARANCE = 160000
 
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
 def generate_guide_pdf(
     pptx_path: str | Path,
     output_dir: str | Path,
@@ -30,9 +34,18 @@ def generate_guide_pdf(
     media_manifest: dict[str, Any] | None = None,
     soffice_path: str | Path | None = None,
     command_runner=None,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, Path]:
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    _g_start = time.perf_counter()
+    _g_timings: dict[str, float] = {}
+
+    def _g_tick(label: str) -> None:
+        nonlocal _g_start
+        now = time.perf_counter()
+        _g_timings[label] = round(now - _g_start, 3)
+        _g_start = now
 
     plan_path = output / "augment_plan.json"
     plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -54,23 +67,53 @@ def generate_guide_pdf(
         return {"augment_plan_path": plan_path, "guide_pdf_path": guide_pdf_path}
 
     guide_deck_path = output / "guide_deck.pptx"
+    if progress:
+        progress({"message": "构建 guide_deck.pptx", "stage": "guide_deck_build"})
     write_guide_deck(pptx_path, guide_deck_path, plan)
+    _g_tick("guide_deck_build")
+
+    changed = _reflow_slide_indices(plan)
+    _g_timings["changed_slide_count"] = len(changed)
+    _g_timings["mode"] = "full"
+    if progress:
+        progress({"message": "LibreOffice 生成 guide.pdf", "stage": "guide_pdf_native"})
     convert_pptx_to_pdf(
         guide_deck_path,
         output,
         soffice_path=soffice_path,
         command_runner=command_runner,
         output_name="guide.pdf",
+        progress=progress,
     )
+    _g_tick("guide_pdf_native")
     if base_pdf_path is not None:
+        if progress:
+            progress({"message": "覆盖 graphicFrame 公式区域", "stage": "guide_overlay"})
         _overlay_graphic_frame_regions(pptx_path, base_pdf_path, guide_pdf_path, plan)
+        _g_tick("graphic_overlay")
+    if progress:
+        progress({"message": "处理媒体覆盖层", "stage": "guide_media_overlay"})
     _overlay_media_if_present(guide_pdf_path, media_manifest)
+    _g_tick("media_overlay")
     _apply_page_compact_if_present(guide_pdf_path, plan)
+    _g_tick("page_compact")
+    _g_timings["guide_total"] = round(sum(v for k, v in _g_timings.items() if k.endswith("_build") or k.endswith("_native") or k.endswith("_overlay") or k == "media_overlay" or k == "page_compact"), 3)
+    _g_timings_path = output / "_guide_timings.json"
+    _g_timings_path.write_text(json.dumps(_g_timings, ensure_ascii=False, indent=2), encoding="utf-8")
     return {
         "augment_plan_path": plan_path,
         "guide_deck_path": guide_deck_path,
         "guide_pdf_path": guide_pdf_path,
     }
+
+
+def _pdf_page_count(pdf_path: Path) -> int:
+    import fitz
+    doc = fitz.open(pdf_path)
+    try:
+        return len(doc)
+    finally:
+        doc.close()
 
 
 def write_guide_deck(pptx_path: str | Path, output_path: str | Path, plan: dict[str, Any]) -> Path:
@@ -858,6 +901,9 @@ def _overlay_graphic_frame_regions(
 ) -> None:
     import fitz
 
+    _ov_start = time.perf_counter()
+    _ov_times: dict[str, float] = {}
+
     source_pptx = Path(source_pptx_path)
     guide_path = Path(guide_pdf_path)
     temp_path = guide_path.with_name(f"{guide_path.stem}.overlay.tmp{guide_path.suffix}")
@@ -867,15 +913,24 @@ def _overlay_graphic_frame_regions(
         (slide_index + 1, str(operation.get("id") or ""))
         for slide_index, _slide_plan, operation in moved_operations
     }
+    changed_slides = _reflow_slide_indices(plan)
+    _ov_times["moved_operations"] = round(time.perf_counter() - _ov_start, 3)
 
     guide_doc = fitz.open(guide_path)
     try:
+        _t = time.perf_counter()
         operations = [
             *moved_operations,
-            *_stable_graphic_frame_overlay_operations(fitz, guide_doc, plan, moved_keys),
+            *_stable_graphic_frame_overlay_operations(fitz, guide_doc, plan, moved_keys, changed_slides),
         ]
+        _ov_times["stable_operations"] = round(time.perf_counter() - _t, 3)
+        _ov_times["total_operations"] = len(operations)
         if not operations:
             return
+        preview_count = 0
+        draw_count = 0
+        _t_preview = 0.0
+        _t_draw = 0.0
         for slide_index, slide_plan, operation in operations:
             if slide_index < 0 or slide_index >= len(guide_doc):
                 continue
@@ -893,15 +948,29 @@ def _overlay_graphic_frame_regions(
             object_id = str(operation.get("id") or "")
             preview_key = (slide_index + 1, object_id)
             if preview_key not in previews:
+                _pt = time.perf_counter()
                 previews[preview_key] = _graphic_frame_preview(source_pptx, slide_index + 1, object_id) or {}
+                _t_preview += time.perf_counter() - _pt
+                preview_count += 1
             preview = previews[preview_key]
             if preview and (not operation.get("stable") or _graphic_frame_preview_is_usable(preview)):
+                _dt = time.perf_counter()
                 _draw_graphic_frame_preview(target_page, target_rect, preview)
+                _t_draw += time.perf_counter() - _dt
+                draw_count += 1
 
-        guide_doc.save(temp_path)
+        _st = time.perf_counter()
+        guide_doc.save(temp_path, garbage=4, deflate=True)
+        _ov_times["save_seconds"] = round(time.perf_counter() - _st, 3)
+        _ov_times["preview_count"] = preview_count
+        _ov_times["preview_seconds"] = round(_t_preview, 3)
+        _ov_times["draw_count"] = draw_count
+        _ov_times["draw_seconds"] = round(_t_draw, 3)
     finally:
         guide_doc.close()
     temp_path.replace(guide_path)
+    _ov_detail_path = guide_path.parent / "_overlay_timings.json"
+    _ov_detail_path.write_text(json.dumps(_ov_times, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _graphic_frame_overlay_operations(plan: dict[str, Any]):
@@ -916,11 +985,13 @@ def _graphic_frame_overlay_operations(plan: dict[str, Any]):
             yield slide_index, slide_plan, operation
 
 
-def _stable_graphic_frame_overlay_operations(fitz: Any, guide_doc: Any, plan: dict[str, Any], moved_keys: set[tuple[int, str]]):
+def _stable_graphic_frame_overlay_operations(fitz: Any, guide_doc: Any, plan: dict[str, Any], moved_keys: set[tuple[int, str]], changed_slides: set[int] | None = None):
     for slide_plan in plan.get("slides", []):
         slide_number = int(slide_plan.get("source_slide") or 0)
         slide_index = slide_number - 1
         if slide_index < 0 or slide_index >= len(guide_doc):
+            continue
+        if changed_slides is not None and slide_index not in changed_slides:
             continue
         page = guide_doc[slide_index]
         page_size = _slide_page_size(slide_plan)
@@ -1539,3 +1610,105 @@ def _text_shape(
   <p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom>{fill_xml}{line_xml}</p:spPr>
   <p:txBody><a:bodyPr wrap="square"{anchor_xml} lIns="{body_inset_x}" tIns="{body_inset_y}" rIns="{body_inset_x}" bIns="{body_inset_y}"/><a:lstStyle/><a:p>{paragraph_xml}<a:r><a:rPr lang="zh-CN" sz="{size}"><a:solidFill><a:srgbClr val="{color}"/></a:solidFill><a:latin typeface="Microsoft YaHei"/><a:ea typeface="Microsoft YaHei"/></a:rPr><a:t>{text_xml}</a:t></a:r></a:p></p:txBody>
 </p:sp>'''
+
+
+
+def _reflow_slide_indices(plan: dict[str, Any]) -> set[int]:
+    """Return 0-based slide indices that need PPTX-level modification."""
+    changed: set[int] = set()
+    for slide_plan in plan.get("slides", []):
+        slide_number = int(slide_plan.get("source_slide") or 0)
+        if slide_number <= 0:
+            continue
+        if slide_plan.get("strategy") == "object_reflow":
+            changed.add(slide_number - 1)
+        elif slide_plan.get("inline_markers"):
+            changed.add(slide_number - 1)
+        elif slide_plan.get("text_box_repairs"):
+            changed.add(slide_number - 1)
+    return changed
+
+
+def _extract_slim_pptx(full_pptx_path: Path, output_path: Path, keep_slide_numbers: set[int]) -> None:
+    """Copy full_pptx_path to output_path, keeping only slides in keep_slide_numbers."""
+    keep = keep_slide_numbers
+    with zipfile.ZipFile(full_pptx_path, "r") as src:
+        entries = {name: src.read(name) for name in src.namelist()}
+
+    slide_nums = sorted(
+        int(m.group(1))
+        for name in entries
+        if (m := re.fullmatch(r"ppt/slides/slide(\d+)\.xml", name))
+    )
+
+    pres_rels_name = "ppt/_rels/presentation.xml.rels"
+    if pres_rels_name in entries:
+        rels_xml = entries[pres_rels_name].decode("utf-8")
+        rid_for_slide: dict[int, str] = {}
+        for m in re.finditer(r'<Relationship\b[^>]*\bId="(rId\d+)"[^>]*\bTarget="slides/slide(\d+)\.xml"', rels_xml):
+            rid_for_slide[int(m.group(2))] = m.group(1)
+        for num in slide_nums:
+            if num not in keep:
+                rid = rid_for_slide.get(num)
+                if rid:
+                    rels_xml = re.sub(
+                        r'<Relationship\b[^>]*\bId="' + re.escape(rid) + r'"[^>]*/>',
+                        "",
+                        rels_xml,
+                    )
+        entries[pres_rels_name] = rels_xml.encode("utf-8")
+
+    pres_name = "ppt/presentation.xml"
+    if pres_name in entries:
+        pres_xml = entries[pres_name].decode("utf-8")
+        if pres_rels_name in entries:
+            for num in slide_nums:
+                if num not in keep:
+                    rid = rid_for_slide.get(num)
+                    if rid:
+                        pres_xml = re.sub(
+                            r'<p:sldId\b[^>]*\br:id="' + re.escape(rid) + r'"[^>]*/>',
+                            "",
+                            pres_xml,
+                        )
+        entries[pres_name] = pres_xml.encode("utf-8")
+
+    for num in slide_nums:
+        if num in keep:
+            continue
+        entries.pop(f"ppt/slides/slide{num}.xml", None)
+        entries.pop(f"ppt/slides/_rels/slide{num}.xml.rels", None)
+        entries.pop(f"ppt/notesSlides/notesSlide{num}.xml", None)
+
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for name, data in entries.items():
+            dst.writestr(name, data)
+
+
+def _stitch_guide_from_base(
+    base_pdf_path: Path,
+    slim_pdf_path: Path,
+    output_path: Path,
+    changed_indices: set[int],
+    total_pages: int,
+) -> None:
+    """Build guide.pdf: unchanged pages from base.pdf, changed pages from slim PDF."""
+    import fitz
+
+    base_doc = fitz.open(base_pdf_path)
+    slim_doc = fitz.open(slim_pdf_path)
+    result = fitz.open()
+    try:
+        slim_idx = 0
+        for i in range(total_pages):
+            if i in changed_indices and slim_idx < len(slim_doc):
+                result.insert_pdf(slim_doc, from_page=slim_idx, to_page=slim_idx)
+                slim_idx += 1
+            else:
+                if i < len(base_doc):
+                    result.insert_pdf(base_doc, from_page=i, to_page=i)
+        result.save(output_path, garbage=4, deflate=True)
+    finally:
+        base_doc.close()
+        slim_doc.close()
+        result.close()

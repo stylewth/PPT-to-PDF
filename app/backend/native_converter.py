@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 
 class NativeConversionError(RuntimeError):
@@ -12,12 +12,14 @@ class NativeConversionError(RuntimeError):
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
-
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 DEFAULT_WINDOWS_SOFFICE_PATHS = (
     r"C:\Program Files\LibreOffice\program\soffice.exe",
     r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
 )
+
+_cached_soffice_path: Path | None = None
 
 
 def convert_pptx_to_pdf(
@@ -29,6 +31,7 @@ def convert_pptx_to_pdf(
     timeout_seconds: int = 120,
     command_runner: CommandRunner | None = None,
     output_name: str = "base.pdf",
+    progress: ProgressCallback | None = None,
 ) -> Path:
     source = Path(pptx_path)
     if source.suffix.lower() != ".pptx":
@@ -45,10 +48,14 @@ def convert_pptx_to_pdf(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     work_dir = output / f".native_conversion_{uuid.uuid4().hex}"
-    profile_dir = output / f".libreoffice_profile_{uuid.uuid4().hex}"
+    import tempfile as _tempfile
+    profile_dir = Path(_tempfile.gettempdir()) / "slide2study_lo_profile"
     work_dir.mkdir(parents=True, exist_ok=False)
-    profile_dir.mkdir(parents=True, exist_ok=False)
+    profile_dir.mkdir(parents=True, exist_ok=True)
     runner = command_runner or subprocess.run
+
+    if progress:
+        progress({"message": "启动 LibreOffice 转换...", "stage": "native_convert"})
 
     command = [
         str(soffice),
@@ -88,7 +95,6 @@ def convert_pptx_to_pdf(
         raise NativeConversionError(f"LibreOffice conversion timed out after {timeout_seconds} seconds.") from exc
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
-        shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def find_soffice(
@@ -96,11 +102,16 @@ def find_soffice(
     soffice_path: str | Path | None = None,
     search_paths: Sequence[str | Path] | None = None,
 ) -> Path | None:
+    global _cached_soffice_path
     if soffice_path is not None:
         explicit = Path(soffice_path)
         if explicit.exists():
+            _cached_soffice_path = explicit
             return explicit
         raise NativeConversionError(f"Configured LibreOffice soffice path does not exist: {explicit}")
+
+    if _cached_soffice_path is not None and _cached_soffice_path.exists():
+        return _cached_soffice_path
 
     candidates: list[str | Path] = []
     if search_paths is None:
@@ -115,6 +126,7 @@ def find_soffice(
     for candidate in candidates:
         path = Path(candidate)
         if path.exists():
+            _cached_soffice_path = path
             return path
     return None
 

@@ -118,6 +118,18 @@ class V6PerformanceFlowTest(unittest.TestCase):
                         {
                             "source_slide": 1,
                             "size": {"width": 1000, "height": 1000},
+                            "object_reflow": {
+                                "operations": [
+                                    {
+                                        "id": "formula1",
+                                        "object_type": "graphicFrame",
+                                        "render_mode": "pdf_region_overlay",
+                                        "op": "move",
+                                        "from": {"x": 10, "y": 20, "w": 100, "h": 80},
+                                        "to": {"x": 50, "y": 60, "w": 100, "h": 80},
+                                    }
+                                ]
+                            },
                             "object_boxes": [
                                 {
                                     "id": "formula1",

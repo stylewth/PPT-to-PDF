@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Callable
@@ -25,6 +26,35 @@ from study_builder import build_study_document
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 
+_conversion_cache: dict[str, dict[str, Any]] = {}
+_CACHE_VERSION = 1
+
+
+def _cache_file_path() -> Path:
+    import tempfile
+    return Path(tempfile.gettempdir()) / "slide2study_conv_cache.json"
+
+
+def _load_disk_cache() -> dict[str, dict[str, Any]]:
+    path = _cache_file_path()
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("_version") == _CACHE_VERSION:
+                return {k: v for k, v in raw.items() if k != "_version"}
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_disk_cache(data: dict[str, dict[str, Any]]) -> None:
+    try:
+        payload = dict(data)
+        payload["_version"] = _CACHE_VERSION
+        _cache_file_path().write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
 
 def convert_pptx(
     pptx_path: str | Path,
@@ -35,16 +65,65 @@ def convert_pptx(
     command_runner=None,
     progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
+    source = Path(pptx_path)
+    source_hash = _file_sha256(source)
+    disk_cache = _load_disk_cache() if not _conversion_cache else {}
+    cached = _conversion_cache.get(source_hash) or disk_cache.get(source_hash)
+    if cached:
+        cached_base = cached.get("base_pdf_path")
+        cached_guide = cached.get("guide_pdf_path")
+        if cached_base and Path(cached_base).exists() and cached_guide and Path(cached_guide).exists():
+            output = Path(output_dir)
+            output.mkdir(parents=True, exist_ok=True)
+            import shutil
+            new_base = output / "base.pdf"
+            new_guide = output / "guide.pdf"
+            shutil.copyfile(cached_base, new_base)
+            shutil.copyfile(cached_guide, new_guide)
+            result = dict(cached)
+            result["base_pdf_path"] = str(new_base)
+            result["guide_pdf_path"] = str(new_guide)
+            for key in ("analysis_path", "augment_plan_path", "metrics_path", "media_manifest_path",
+                        "knowledge_blocks_path", "report_path", "preview_html_path", "compare_html_path",
+                        "guide_preview_manifest_path"):
+                if result.get(key):
+                    src = Path(result[key])
+                    if src.exists():
+                        dst = output / src.name
+                        shutil.copyfile(src, dst)
+                        result[key] = str(dst)
+            cached_preview_manifest = cached.get("guide_preview_manifest_path")
+            if cached_preview_manifest:
+                manifest_src = Path(cached_preview_manifest)
+                preview_dir = manifest_src.parent / "guide_preview"
+                if preview_dir.is_dir():
+                    dst_preview_dir = output / "guide_preview"
+                    if dst_preview_dir.exists():
+                        shutil.rmtree(dst_preview_dir, ignore_errors=True)
+                    shutil.copytree(preview_dir, dst_preview_dir)
+            _emit_progress(progress, 100, "复用缓存结果", "cached", 100)
+            return result
+
     started_at = time.perf_counter()
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    _t = started_at
+    _timings: dict[str, float] = {}
+
+    def _tick(label: str) -> None:
+        nonlocal _t
+        now = time.perf_counter()
+        _timings[label] = round(now - _t, 3)
+        _t = now
 
     _emit_progress(progress, 8, "解析 PPTX", "parse", 18)
     presentation = parse_pptx(pptx_path)
     document = build_study_document(presentation)
+    _tick("parse_pptx")
 
     _emit_progress(progress, 18, "分析课件结构", "analysis", 35)
     analysis = analyze_presentation(presentation)
+    _tick("analyze")
 
     report_path = output / "report.json"
     analysis_path = output / "analysis.json"
@@ -66,18 +145,21 @@ def convert_pptx(
     media_manifest = process_presentation_media(pptx_path, presentation, output)
     knowledge_blocks = build_knowledge_blocks(presentation, analysis, plan, media_manifest)
     write_knowledge_blocks(knowledge_blocks_path, knowledge_blocks)
+    _tick("plan_and_media")
     base_pdf_path = None
     guide_pdf_path = None
     augment_plan_path = output / "augment_plan.json"
     if render_pdf:
-        _emit_progress(progress, 58, "LibreOffice 生成 base.pdf", "base_pdf", 70)
+        _emit_progress(progress, 58, "LibreOffice 生成 base.pdf", "base_pdf_native", 64)
         base_pdf_path = convert_pptx_to_pdf(
             pptx_path,
             output,
             soffice_path=soffice_path,
             command_runner=command_runner,
+            progress=progress,
         )
-        _emit_progress(progress, 70, "生成 guide.pdf", "guide_pdf", 82)
+        _tick("base_pdf_native")
+        _emit_progress(progress, 64, "准备 guide 输出", "guide_deck_build", 70)
         guide_outputs = generate_guide_pdf(
             pptx_path,
             output,
@@ -86,18 +168,31 @@ def convert_pptx(
             media_manifest=media_manifest,
             soffice_path=soffice_path,
             command_runner=command_runner,
+            progress=progress,
         )
+        _tick("guide_pdf_total")
         guide_pdf_path = guide_outputs.get("guide_pdf_path")
         augment_plan_path = guide_outputs["augment_plan_path"]
         if guide_pdf_path:
-            _emit_progress(progress, 82, "生成 guide 预览", "preview", 90)
+            _emit_progress(progress, 82, "生成 guide 预览", "guide_preview", 86)
             guide_preview_manifest_path = build_guide_preview(guide_pdf_path, output)
+            _tick("guide_preview")
     else:
         _emit_progress(progress, 82, "写入导读计划", "augment_plan", 90)
         augment_plan_path.write_text(
             json.dumps(plan, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    _emit_progress(progress, 86, "渲染质量自检", "render_check", 90)
+    reflow_intent_check = _build_reflow_intent_check(plan)
+    render_visual_check = _build_render_visual_check(
+        guide_pdf_path,
+        output,
+        plan,
+        guide_preview_manifest_path=guide_preview_manifest_path,
+    )
+    _tick("render_check")
 
     _emit_progress(progress, 90, "写入报告和指标", "report", 98)
     write_study_html(document, preview_html_path)
@@ -112,13 +207,6 @@ def convert_pptx(
         runtime_seconds=time.perf_counter() - started_at,
     )
     write_metrics(metrics_path, metrics)
-    reflow_intent_check = _build_reflow_intent_check(plan)
-    render_visual_check = _build_render_visual_check(
-        guide_pdf_path,
-        output,
-        plan,
-        guide_preview_manifest_path=guide_preview_manifest_path,
-    )
 
     report = {
         "kind": "conversion_report",
@@ -156,8 +244,12 @@ def convert_pptx(
             report=report,
         )
 
+    _tick("report_write")
     _emit_progress(progress, 98, "整理转换结果", "finalize", 100)
-    return {
+    _timings["total"] = round(time.perf_counter() - started_at, 3)
+    timings_path = output / "_timings.json"
+    timings_path.write_text(json.dumps(_timings, ensure_ascii=False, indent=2), encoding="utf-8")
+    result = {
         "status": "ok",
         "source": document["source"],
         "base_pdf_path": str(base_pdf_path) if base_pdf_path else None,
@@ -173,6 +265,11 @@ def convert_pptx(
         "preview_html_path": str(preview_html_path),
         "warnings": warnings,
     }
+    _conversion_cache[source_hash] = result
+    all_cached = _load_disk_cache()
+    all_cached[source_hash] = result
+    _save_disk_cache(all_cached)
+    return result
 
 
 def _emit_progress(
@@ -256,8 +353,7 @@ def _render_check_pages(plan: dict[str, Any]) -> list[int]:
             continue
         if (slide.get("object_reflow") or {}).get("operations"):
             pages.add(slide_number)
-            continue
-        if any(str(obj.get("type") or "") == "graphicFrame" for obj in slide.get("object_boxes", [])):
+        elif slide.get("page_compact"):
             pages.add(slide_number)
     return sorted(pages)
 
@@ -309,3 +405,15 @@ def _compact_render_box(
         "w": int(int(bbox["w"]) * scale),
         "h": int(int(bbox["h"]) * scale),
     }
+
+
+
+def _file_sha256(path: Path) -> str:
+    sha = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(65536)
+            if not chunk:
+                break
+            sha.update(chunk)
+    return sha.hexdigest()

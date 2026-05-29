@@ -1419,3 +1419,18 @@ function dispatchReaderEvent(name, detail) {
   event.initCustomEvent(name, false, false, detail);
   document.dispatchEvent(event);
 }
+
+const clearCacheBtn = document.querySelector("#clearCacheButton");
+if (clearCacheBtn) {
+  clearCacheBtn.addEventListener("click", async () => {
+    try {
+      const resp = await fetch("/api/cache/clear");
+      const data = await resp.json();
+      clearCacheBtn.textContent = data.cleared ? "缓存已清除" : "无缓存";
+      setTimeout(() => { clearCacheBtn.textContent = "清除缓存"; }, 2000);
+    } catch (_) {
+      clearCacheBtn.textContent = "操作失败";
+      setTimeout(() => { clearCacheBtn.textContent = "清除缓存"; }, 2000);
+    }
+  });
+}

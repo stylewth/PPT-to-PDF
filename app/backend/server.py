@@ -44,21 +44,21 @@ class ConvertJobStore:
         self,
         job_id: str,
         *,
-        percent: int,
+        percent: int | None = None,
         message: str,
         stage: str,
         next_percent: int | None = None,
     ) -> None:
         with self._lock:
             job = self._require_job(job_id)
-            job.update(
-                {
-                    "status": "running",
-                    "percent": _clamp_percent(percent),
-                    "message": message,
-                    "stage": stage,
-                }
-            )
+            patch: dict[str, Any] = {
+                "status": "running",
+                "message": message,
+                "stage": stage,
+            }
+            if percent is not None:
+                patch["percent"] = _clamp_percent(percent)
+            job.update(patch)
             if next_percent is not None:
                 job["next_percent"] = _clamp_percent(next_percent)
 
@@ -154,6 +154,13 @@ class Slide2StudyHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             self._send_json({"status": "ok"})
+            return
+        if parsed.path == "/api/cache/clear":
+            from converter import _cache_file_path
+            cache_path = _cache_file_path()
+            if cache_path.exists():
+                cache_path.unlink()
+            self._send_json({"status": "ok", "cleared": True})
             return
         if parsed.path == "/api/convert-status":
             try:
@@ -386,9 +393,11 @@ def build_convert_response(job_id: str, result: dict[str, Any]) -> dict[str, Any
 
 def _run_convert_job(job_id: str, deck_path: Path, output_dir: Path) -> None:
     def on_progress(event: dict[str, Any]) -> None:
+        raw_percent = event.get("percent")
+        percent = int(raw_percent) if raw_percent is not None else None
         CONVERT_JOBS.update(
             job_id,
-            percent=int(event.get("percent") or 0),
+            percent=percent,
             message=str(event.get("message") or "转换中"),
             stage=str(event.get("stage") or "running"),
             next_percent=event.get("next_percent"),
