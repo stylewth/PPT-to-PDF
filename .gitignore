@@ -16,6 +16,7 @@ htmlcov/
 
 # Virtual environments
 .venv/
+.venv-build/
 venv/
 env/
 
@@ -33,6 +34,19 @@ app/.tmp_tests/
 app/tmp_tests_plain/
 app/tests/.tmp_runs/
 app/tests/.tmp_*/
+data/
+logs/
+demo_outputs/
+dist/
+build/
+*.spec.bak
+
+# Local release/package artifacts
+程序包/
+程序包.zip
+release/*.zip
+runtime/
+.claude/
 
 # Local configuration and secrets
 .env
